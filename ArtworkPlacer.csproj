@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>ArtworkPlacer</AssemblyName>
+    <RootNamespace>ArtworkPlacer</RootNamespace>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Local build: use Revit installation -->
+    <Reference Condition="Exists('C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll')" Include="RevitAPI">
+      <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Condition="Exists('C:\Program Files\Autodesk\Revit 2024\RevitAPIUI.dll')" Include="RevitAPIUI">
+      <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- CI build: use NuGet packages when Revit is not installed -->
+  <ItemGroup Condition="!Exists('C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll')">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2024.*" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2024.*" />
+  </ItemGroup>
+
+</Project>
