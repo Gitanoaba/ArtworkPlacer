@@ -5,7 +5,7 @@
     <Assembly>.\ArtworkPlacer.dll</Assembly>
     <AddInId>7aba9aa3-c4bc-40f9-8baf-f48179d52c7c</AddInId>
     <FullClassName>ArtworkPlacer.App</FullClassName>
-    <Description>Automatically places artwork on the selected walls.</Description>
+    <Description>Automatically places artwork and meeting-room TVs on the selected walls.</Description>
     <VendorId>Eitan</VendorId>
     <VendorDescription>Eitan @ Qbiq</VendorDescription>
   </AddIn>

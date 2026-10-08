@@ -12,9 +12,6 @@ namespace ArtworkPlacer
     // así que no quedan en el modelo ni en el historial de Undo.
     internal class SidePreview
     {
-        private static readonly Color OkColor = new Color(230, 0, 90);
-        private static readonly Color BlockedColor = new Color(150, 150, 150);
-
         private readonly UIDocument _uidoc;
         private readonly Document _doc;
         private readonly WallPlacer _placer;
@@ -27,8 +24,8 @@ namespace ArtworkPlacer
         private readonly Dictionary<ElementId, ElementId> _arrowToWall = new Dictionary<ElementId, ElementId>();
         private readonly Dictionary<ElementId, int> _blocked = new Dictionary<ElementId, int>();
         private readonly Dictionary<ElementId, int> _pieces = new Dictionary<ElementId, int>();
-        private readonly Dictionary<long, SketchPlane> _planes = new Dictionary<long, SketchPlane>();
         private View _view;
+        private ArrowPainter _painter;
 
         public SidePreview(UIDocument uidoc, WallPlacer placer, List<Wall> walls, Dictionary<ElementId, List<int>> choice, string title)
         {
@@ -56,6 +53,7 @@ namespace ArtworkPlacer
                 return ask.Show() == TaskDialogResult.Yes;
             }
 
+            _painter = new ArrowPainter(_doc, _view);
             using (var tg = new TransactionGroup(_doc, "Artwork preview"))
             {
                 tg.Start();
@@ -142,7 +140,7 @@ namespace ArtworkPlacer
                     {
                         total++;
                         if (spot.Blocked) blocked++;
-                        ids.AddRange(DrawArrow(spot));
+                        ids.AddRange(_painter.Draw(spot.OnFace, spot.Normal, spot.Along, spot.Blocked));
                     }
                     _arrows[wall.Id] = ids;
                     _blocked[wall.Id] = blocked;
@@ -152,56 +150,6 @@ namespace ArtworkPlacer
                 t.Commit();
             }
             _uidoc.RefreshActiveView();
-        }
-
-        // Flecha en forma de "T": la barra queda pegada a la cara, la punta toca la barra
-        private List<ElementId> DrawArrow(WallPlacer.Spot spot)
-        {
-            double len = _view is ViewPlan
-                ? UnitUtils.ConvertToInternalUnits(Math.Max(1, _view.Scale) * 12, UnitTypeId.Millimeters)
-                : UnitUtils.ConvertToInternalUnits(60, UnitTypeId.Centimeters);
-            len = Math.Min(Math.Max(len, UnitUtils.ConvertToInternalUnits(30, UnitTypeId.Centimeters)),
-                           UnitUtils.ConvertToInternalUnits(200, UnitTypeId.Centimeters));
-            double head = len * 0.3;
-
-            double z = _view is ViewPlan vp && vp.GenLevel != null ? vp.GenLevel.ProjectElevation : spot.OnFace.Z;
-            XYZ tip = new XYZ(spot.OnFace.X, spot.OnFace.Y, z) + spot.Normal * (len * 0.03);
-            XYZ n = spot.Normal, a = spot.Along;
-
-            var segments = new[]
-            {
-                Tuple.Create(tip + n * len, tip),                                  // cuerpo
-                Tuple.Create(tip + n * head + a * head * 0.6, tip),                // punta
-                Tuple.Create(tip + n * head - a * head * 0.6, tip),
-                Tuple.Create(tip - a * head * 1.2, tip + a * head * 1.2)           // barra sobre la cara
-            };
-
-            var ogs = new OverrideGraphicSettings()
-                .SetProjectionLineColor(spot.Blocked ? BlockedColor : OkColor)
-                .SetProjectionLineWeight(spot.Blocked ? 4 : 9);
-
-            var ids = new List<ElementId>();
-            foreach (var seg in segments)
-            {
-                Line line = Line.CreateBound(seg.Item1, seg.Item2);
-                CurveElement ce = _view is ViewPlan
-                    ? (CurveElement)_doc.Create.NewDetailCurve(_view, line)
-                    : _doc.Create.NewModelCurve(line, PlaneAt(z));
-                try { _view.SetElementOverrides(ce.Id, ogs); } catch { }
-                ids.Add(ce.Id);
-            }
-            return ids;
-        }
-
-        private SketchPlane PlaneAt(double z)
-        {
-            long key = (long)Math.Round(z * 1000);
-            if (!_planes.TryGetValue(key, out SketchPlane sp) || !sp.IsValidObject)
-            {
-                sp = SketchPlane.Create(_doc, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, new XYZ(0, 0, z)));
-                _planes[key] = sp;
-            }
-            return sp;
         }
 
         private class PreviewFilter : ISelectionFilter

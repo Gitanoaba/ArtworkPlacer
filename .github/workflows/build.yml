@@ -34,3 +34,4 @@ jobs:
             bin/Release/ArtworkPlacer.dll
             ArtworkPlacer.addin
             ArtworkPlacer.png
+            TvPlacer.png
