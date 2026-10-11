@@ -17,6 +17,17 @@ namespace ArtworkPlacer
 
         // Se recuerdan entre corridas dentro de la misma sesión de Revit
         private static readonly DialogSettings _settings = new DialogSettings();
+        internal static DialogSettings Settings => _settings;   // Align Heights usa la misma altura
+
+        // Valores por defecto en las unidades del proyecto (se calculan una vez por sesión)
+        internal static void InitDefaults(Func<double, string> fmt)
+        {
+            string Cm(double cm) => fmt(UnitUtils.ConvertToInternalUnits(cm, UnitTypeId.Centimeters));
+            if (_settings.HeightDefaults == null) _settings.HeightDefaults = new[] { Cm(150), Cm(110), Cm(200) };
+            if (_settings.HeightText == null) _settings.HeightText = _settings.HeightDefaults[0];
+            if (_settings.ClearText == null) _settings.ClearText = Cm(30);
+            if (_settings.GapText == null) _settings.GapText = Cm(60);
+        }
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
@@ -40,9 +51,7 @@ namespace ArtworkPlacer
             Units units = doc.GetUnits();
             Func<string, double?> parse = s => UnitFormatUtils.TryParse(units, SpecTypeId.Length, s, out double v) ? v : (double?)null;
             string Fmt(double ft) => UnitFormatUtils.Format(units, SpecTypeId.Length, ft, false);
-            if (_settings.HeightText == null) _settings.HeightText = Fmt(UnitUtils.ConvertToInternalUnits(150, UnitTypeId.Centimeters));
-            if (_settings.ClearText == null) _settings.ClearText = Fmt(UnitUtils.ConvertToInternalUnits(30, UnitTypeId.Centimeters));
-            if (_settings.GapText == null) _settings.GapText = Fmt(UnitUtils.ConvertToInternalUnits(60, UnitTypeId.Centimeters));
+            InitDefaults(Fmt);
 
             Func<FamilySymbol, bool> isDefault = s => LooksLikeArtwork(s.FamilyName);
             Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa = paths =>
@@ -61,7 +70,7 @@ namespace ArtworkPlacer
                 .Where(s => s != null)
                 .ToList();
 
-            var placer = new WallPlacer(doc, symbols, dlg.CenterHeight, dlg.Clearance, dlg.Gap, dlg.MaxPerFace, _settings.Side, Fmt);
+            var placer = new WallPlacer(doc, symbols, dlg.ArtHeight, dlg.Align, dlg.Clearance, dlg.Gap, dlg.MaxPerFace, _settings.Side, Fmt);
             var placedIds = new List<ElementId>();
             var skipped = new List<string>();
 
@@ -231,7 +240,7 @@ namespace ArtworkPlacer
             return bb == null ? 0 : ((bb.Min + bb.Max) / 2).DotProduct(right);
         }
 
-        private static bool LooksLikeArtwork(string familyName)
+        internal static bool LooksLikeArtwork(string familyName)
         {
             string n = familyName.Replace(" ", "").Replace("_", "").ToLowerInvariant();
             return n.Contains("artwork");
@@ -262,7 +271,7 @@ namespace ArtworkPlacer
         }
 
         // Ocultar advertencias (p.ej. instancias duplicadas) para no frenar la corrida
-        private class WarningSwallower : IFailuresPreprocessor
+        internal class WarningSwallower : IFailuresPreprocessor
         {
             public FailureProcessingResult PreprocessFailures(FailuresAccessor a)
             {
@@ -278,17 +287,19 @@ namespace ArtworkPlacer
     {
         private const string Marker = "ArtworkPlacer";   // se escribe en Comments de cada pieza colocada
 
-        private readonly double? _centerHeight;
+        private readonly double? _height;              // null = altura por defecto de la familia
+        private readonly HeightAlign _align;
         private readonly double _gap;
         private readonly int _maxPerFace;
         private readonly SideMode _sideMode;
         private readonly Func<double, string> _fmt;
         private int _typeIndex;
 
-        public WallPlacer(Document doc, List<FamilySymbol> symbols, double? centerHeight, double clearance, double gap, int maxPerFace, SideMode sideMode, Func<double, string> fmt)
+        public WallPlacer(Document doc, List<FamilySymbol> symbols, double? height, HeightAlign align, double clearance, double gap, int maxPerFace, SideMode sideMode, Func<double, string> fmt)
             : base(doc, symbols, clearance, Marker)
         {
-            _centerHeight = centerHeight;
+            _height = height;
+            _align = align;
             _gap = gap;
             _maxPerFace = Math.Max(1, maxPerFace);
             _sideMode = sideMode;
@@ -305,9 +316,20 @@ namespace ArtworkPlacer
             public bool Blocked;        // sin tramo libre o ya tiene artwork
         }
 
-        private double RefHeight => _centerHeight ?? UnitUtils.ConvertToInternalUnits(150, UnitTypeId.Centimeters);
+        // Altura aproximada del centro de la pieza: para obstáculos, flechas y el primer punto de colocación
+        private double RefHeight
+        {
+            get
+            {
+                double cm40 = UnitUtils.ConvertToInternalUnits(40, UnitTypeId.Centimeters);
+                if (!_height.HasValue) return UnitUtils.ConvertToInternalUnits(150, UnitTypeId.Centimeters);
+                if (_align == HeightAlign.Bottom) return _height.Value + cm40;
+                if (_align == HeightAlign.Top) return _height.Value - cm40;
+                return _height.Value;
+            }
+        }
 
-        private double Height(FamilySymbol sym) => _centerHeight ?? DefaultElevation(sym);
+        private double Height(FamilySymbol sym) => _height.HasValue ? RefHeight : DefaultElevation(sym);
 
         // Caras elegidas según el modo del diálogo (+1 exterior, -1 interior)
         public List<int> InitialSides(Wall wall, out string error)
@@ -460,7 +482,7 @@ namespace ArtworkPlacer
                 if (fi == null) continue;
                 _doc.Regenerate();
 
-                Box box = LocalBox(fi);
+                Box box = PieceBox(fi);
                 if (box == null) { _doc.Delete(fi.Id); continue; }
 
                 double width = box.U1 - box.U0;
@@ -473,8 +495,8 @@ namespace ArtworkPlacer
                 }
 
                 XYZ move = _d * (center - (box.U0 + box.U1) / 2);
-                if (_centerHeight.HasValue)
-                    move += XYZ.BasisZ * (level.ProjectElevation + _centerHeight.Value - (box.Z0 + box.Z1) / 2);
+                if (_height.HasValue)
+                    move += XYZ.BasisZ * ArtGeometry.AlignDelta(_align, level.ProjectElevation + _height.Value, box.Z0, box.Z1);
                 if (!move.IsZeroLength())
                     ElementTransformUtils.MoveElement(_doc, fi.Id, move);
 

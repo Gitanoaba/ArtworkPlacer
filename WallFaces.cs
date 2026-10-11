@@ -248,7 +248,7 @@ namespace ArtworkPlacer
                 FamilyInstance fi = Create(sym, wall, g.Level, side, PointOnFace(g.Level, side, u, heightAboveLevel), _n * side.Sign);
                 if (fi == null) return -1;
                 _doc.Regenerate();
-                Box box = LocalBox(fi);
+                Box box = PieceBox(fi);
                 _doc.Delete(fi.Id);
                 return box == null ? -1 : box.U1 - box.U0;
             }
@@ -310,19 +310,35 @@ namespace ArtworkPlacer
             BoundingBoxXYZ bb = e?.get_BoundingBox(null);
             if (bb == null) return null;
 
-            var box = new Box
-            {
-                U0 = double.MaxValue, U1 = double.MinValue,
-                V0 = double.MaxValue, V1 = double.MinValue,
-                Z0 = double.MaxValue, Z1 = double.MinValue
-            };
+            var corners = new List<XYZ>();
             for (int i = 0; i < 8; i++)
             {
                 XYZ c = new XYZ(
                     (i & 1) == 0 ? bb.Min.X : bb.Max.X,
                     (i & 2) == 0 ? bb.Min.Y : bb.Max.Y,
                     (i & 4) == 0 ? bb.Min.Z : bb.Max.Z);
-                c = bb.Transform.OfPoint(c);
+                corners.Add(bb.Transform.OfPoint(c));
+            }
+            return ToBox(corners);
+        }
+
+        // Caja de lo que se ve de una pieza colocada (sin líneas ni objetos ocultos); se usa para medir y alinear
+        protected Box PieceBox(Element e)
+        {
+            List<XYZ> pts = ArtGeometry.VisiblePoints(e);
+            return pts.Count > 0 ? ToBox(pts) : LocalBox(e);
+        }
+
+        private Box ToBox(IEnumerable<XYZ> points)
+        {
+            var box = new Box
+            {
+                U0 = double.MaxValue, U1 = double.MinValue,
+                V0 = double.MaxValue, V1 = double.MinValue,
+                Z0 = double.MaxValue, Z1 = double.MinValue
+            };
+            foreach (XYZ c in points)
+            {
                 XYZ q = c - _p0;
                 double u = q.DotProduct(_d), v = q.DotProduct(_n);
                 box.U0 = Math.Min(box.U0, u); box.U1 = Math.Max(box.U1, u);

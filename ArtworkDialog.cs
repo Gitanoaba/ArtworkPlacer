@@ -35,13 +35,17 @@ namespace ArtworkPlacer
 
     public enum SideMode { Auto = 0, Interior = 1, Exterior = 2, Both = 3 }
 
+    // Qué parte de la pieza queda a la altura indicada
+    public enum HeightAlign { Center = 0, Bottom = 1, Top = 2, FamilyDefault = 3 }
+
     // Opciones del diálogo; se recuerdan entre corridas dentro de la sesión de Revit
     public class DialogSettings
     {
         public string Collection;             // null = todos los tipos
         public string Filter = "art";
+        public HeightAlign Align = HeightAlign.Center;
         public string HeightText;
-        public bool UseHeight = true;
+        public string[] HeightDefaults;       // texto por defecto de cada HeightAlign, en unidades del proyecto
         public string ClearText;
         public SideMode Side = SideMode.Auto;
         public bool Multiple = true;
@@ -58,7 +62,8 @@ namespace ArtworkPlacer
 
         // Resultados (longitudes en pies internos)
         public List<long> SelectedIds => _items.Where(i => i.IsChecked).Select(i => i.Id).ToList();
-        public double? CenterHeight { get; private set; }   // null = respetar la altura de la familia
+        public double? ArtHeight { get; private set; }         // null = respetar la altura de la familia
+        public HeightAlign Align { get; private set; }
         public double Clearance { get; private set; }
         public double Gap { get; private set; }
         public int MaxPerFace { get; private set; }         // 1 = una pieza por cara
@@ -79,7 +84,7 @@ namespace ArtworkPlacer
         private readonly TextBox _search;
         private readonly ItemsControl _list;
         private readonly Label _countLabel;
-        private readonly CheckBox _useHeight;
+        private readonly ComboBox _alignBox;
         private readonly TextBox _heightBox;
         private readonly TextBox _clearBox;
         private readonly ComboBox _sideBox;
@@ -171,12 +176,11 @@ namespace ArtworkPlacer
             grid.ColumnDefinitions.Add(new ColumnDefinition());
             for (int i = 0; i < 7; i++) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-            _useHeight = new CheckBox { Content = "Artwork center height (from level):", IsChecked = settings.UseHeight, VerticalAlignment = VerticalAlignment.Center };
+            _alignBox = NewAlignBox(settings.Align, includeFamilyDefault: true);
             _heightBox = NewBox(settings.HeightText);
-            _heightBox.IsEnabled = settings.UseHeight;
-            _useHeight.Checked += (s, e) => _heightBox.IsEnabled = true;
-            _useHeight.Unchecked += (s, e) => _heightBox.IsEnabled = false;
-            AddRow(grid, 0, _useHeight, _heightBox);
+            _heightBox.IsEnabled = settings.Align != HeightAlign.FamilyDefault;
+            HookAlign(_alignBox, _heightBox, settings);
+            AddRow(grid, 0, _alignBox, _heightBox);
 
             _clearBox = NewBox(settings.ClearText);
             AddRow(grid, 1, NewLabel("Min. clearance to doors/corners:"), _clearBox);
@@ -246,6 +250,33 @@ namespace ArtworkPlacer
 
             SortByScope();
             RefreshList();
+        }
+
+        // Selector de alineación vertical; lo comparte el diálogo de Align Heights
+        internal static ComboBox NewAlignBox(HeightAlign current, bool includeFamilyDefault)
+        {
+            var box = new ComboBox { Margin = new Thickness(0, 3, 8, 3) };
+            box.Items.Add("Artwork center at (from level):");
+            box.Items.Add("Artwork bottom edge at:");
+            box.Items.Add("Artwork top edge at:");
+            if (includeFamilyDefault) box.Items.Add("Family default height");
+            box.SelectedIndex = !includeFamilyDefault && current == HeightAlign.FamilyDefault ? 0 : (int)current;
+            return box;
+        }
+
+        // Al cambiar de modo, si la altura era la de por defecto, poner la del nuevo modo
+        internal static void HookAlign(ComboBox alignBox, TextBox heightBox, DialogSettings settings)
+        {
+            int previous = alignBox.SelectedIndex;
+            alignBox.SelectionChanged += (s, e) =>
+            {
+                int now = alignBox.SelectedIndex;
+                string[] defaults = settings.HeightDefaults;
+                if (defaults != null && previous >= 0 && previous < 3 && now < 3 && heightBox.Text.Trim() == defaults[previous])
+                    heightBox.Text = defaults[now];
+                heightBox.IsEnabled = now != (int)HeightAlign.FamilyDefault;
+                previous = now;
+            };
         }
 
         private static TextBox NewBox(string text) => new TextBox { Text = text, Margin = new Thickness(0, 3, 0, 3), Padding = new Thickness(4) };
@@ -451,13 +482,14 @@ namespace ArtworkPlacer
                 return;
             }
 
-            if (_useHeight.IsChecked == true)
+            Align = (HeightAlign)_alignBox.SelectedIndex;
+            if (Align != HeightAlign.FamilyDefault)
             {
                 double? h = _parseLength(_heightBox.Text);
                 if (h == null || h <= 0) { MessageBox.Show(this, "Invalid height.", "Place Artwork"); return; }
-                CenterHeight = h;
+                ArtHeight = h;
             }
-            else CenterHeight = null;
+            else ArtHeight = null;
 
             double? c = _parseLength(_clearBox.Text);
             if (c == null || c < 0) { MessageBox.Show(this, "Invalid clearance.", "Place Artwork"); return; }
@@ -485,7 +517,7 @@ namespace ArtworkPlacer
             _settings.Collection = _collectionBox.SelectedIndex > 0 ? _collections[_collectionBox.SelectedIndex - 1].Name : null;
             _settings.Filter = _search.Text;
             _settings.HeightText = _heightBox.Text;
-            _settings.UseHeight = CenterHeight.HasValue;
+            _settings.Align = Align;
             _settings.ClearText = _clearBox.Text;
             _settings.Side = (SideMode)_sideBox.SelectedIndex;
             _settings.Multiple = _multiBox.IsChecked == true;

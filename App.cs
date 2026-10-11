@@ -15,12 +15,19 @@ namespace ArtworkPlacer
             // La pestaña puede existir ya si otro add-in nuestro la creó
             try { app.CreateRibbonTab(TabName); } catch (Exception) { }
 
-            AddButton(app.CreateRibbonPanel(TabName, "Artwork"),
+            RibbonPanel artwork = app.CreateRibbonPanel(TabName, "Artwork");
+            AddButton(artwork,
                 "PlaceArtwork", "Place\nArtwork", "ArtworkPlacer.PlaceArtworkCommand", "ArtworkPlacer.png",
                 "Automatically places an artwork piece centered on the longest free segment of each selected wall.",
                 "1. Select the walls (or click the button and pick them).\n" +
                 "2. Choose the artwork types: they rotate from wall to wall.\n" +
                 "3. Check the arrows and click any wall to switch the face it goes on.");
+
+            AddButton(artwork,
+                "AlignArtworkHeights", "Align\nHeights", "ArtworkPlacer.AlignHeightsCommand", "AlignHeights.png",
+                "Moves artwork that is already placed up or down so all pieces share the same height.",
+                "Select the pieces to fix, or select nothing to align all the artwork in the active view.\n" +
+                "Align by center, bottom edge or top edge, measured from each wall's level.");
 
             AddButton(app.CreateRibbonPanel(TabName, "TV"),
                 "PlaceTv", "Place\nTV", "ArtworkPlacer.PlaceTvCommand", "TvPlacer.png",

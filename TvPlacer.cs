@@ -275,7 +275,7 @@ namespace ArtworkPlacer
             if (fi == null) { reason = "the TV could not be placed on this face"; return null; }
             _doc.Regenerate();
 
-            Box box = LocalBox(fi);
+            Box box = PieceBox(fi);
             if (box != null)
             {
                 XYZ move = _d * (spot.Center - (box.U0 + box.U1) / 2);
