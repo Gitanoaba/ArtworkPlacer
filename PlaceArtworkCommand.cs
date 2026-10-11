@@ -52,7 +52,8 @@ namespace ArtworkPlacer
             };
 
             List<TypeItem> types = CollectTypes(doc, isDefault, _settings.LastChecked);
-            var dlg = new ArtworkDialog(walls.Count, types, CollectCollections(doc, types), _settings, parse, loadRfa);
+            var thumbs = new TypeThumbnails(doc, commandData.Application.Application.VersionNumber);
+            var dlg = new ArtworkDialog(walls.Count, types, CollectCollections(doc, types), _settings, parse, loadRfa, thumbs.Get);
             if (dlg.ShowDialog() != true) return Result.Cancelled;
 
             List<FamilySymbol> symbols = dlg.SelectedIds

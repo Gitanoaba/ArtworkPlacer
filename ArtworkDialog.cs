@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace ArtworkPlacer
@@ -14,6 +17,13 @@ namespace ArtworkPlacer
         public string Label;
         public string Kind;
         public bool IsChecked;
+    }
+
+    // Miniatura de un tipo: la foto (o la vista previa de la familia) y el color del marco
+    public class Thumb
+    {
+        public ImageSource Image;
+        public Color? Frame;
     }
 
     // Colección de artwork = una sección "Artwork_*" del template, con sus tipos en orden de izquierda a derecha
@@ -58,11 +68,16 @@ namespace ArtworkPlacer
         private readonly DialogSettings _settings;
         private readonly Func<string, double?> _parseLength;
         private readonly Func<string[], Tuple<List<TypeItem>, HashSet<long>>> _loadRfa;
+        private readonly Func<long, Thumb> _thumbs;
         private List<long> _scope;                          // null = todos los tipos
+        private int _refreshGen;                            // invalida la carga de miniaturas de una lista anterior
+
+        private static readonly Brush CheckedBrush = new SolidColorBrush(Color.FromRgb(230, 0, 90));
+        private static readonly Brush TileBrush = new SolidColorBrush(Color.FromRgb(245, 245, 245));
 
         private readonly ComboBox _collectionBox;
         private readonly TextBox _search;
-        private readonly ListBox _list;
+        private readonly ItemsControl _list;
         private readonly Label _countLabel;
         private readonly CheckBox _useHeight;
         private readonly TextBox _heightBox;
@@ -79,16 +94,18 @@ namespace ArtworkPlacer
             List<ArtCollection> collections,
             DialogSettings settings,
             Func<string, double?> parseLength,
-            Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa)
+            Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa,
+            Func<long, Thumb> thumbs)
         {
             _items = items;
             _collections = collections;
             _settings = settings;
             _parseLength = parseLength;
             _loadRfa = loadRfa;
+            _thumbs = thumbs;
 
             Title = "Place Artwork";
-            Width = 540;
+            Width = 680;
             SizeToContent = SizeToContent.Height;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             ResizeMode = ResizeMode.NoResize;
@@ -120,8 +137,24 @@ namespace ArtworkPlacer
             searchRow.Children.Add(_search);
             root.Children.Add(searchRow);
 
-            _list = new ListBox { Height = 220 };
-            root.Children.Add(_list);
+            // Grilla de miniaturas: clic para marcar, pasar el mouse para verla grande
+            _list = new ItemsControl
+            {
+                ItemsPanel = new ItemsPanelTemplate(new FrameworkElementFactory(typeof(WrapPanel)))
+            };
+            root.Children.Add(new Border
+            {
+                BorderBrush = Brushes.LightGray,
+                BorderThickness = new Thickness(1),
+                Child = new ScrollViewer
+                {
+                    Height = 330,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Padding = new Thickness(3),
+                    Content = _list
+                }
+            });
 
             var listButtons = new DockPanel { Margin = new Thickness(0, 4, 0, 8) };
             var btnAll = new Button { Content = "Check visible", Padding = new Thickness(8, 2, 8, 2) };
@@ -260,15 +293,130 @@ namespace ArtworkPlacer
         private void RefreshList()
         {
             _list.Items.Clear();
+            int gen = ++_refreshGen;
+            var pending = new Queue<Tuple<TypeItem, Tile>>();
             foreach (var it in _items.Where(Visible))
             {
-                var item = it;
-                var cb = new CheckBox { Content = $"{item.Label}   [{item.Kind}]", IsChecked = item.IsChecked };
-                cb.Checked += (s, e) => { item.IsChecked = true; UpdateCount(); };
-                cb.Unchecked += (s, e) => { item.IsChecked = false; UpdateCount(); };
-                _list.Items.Add(cb);
+                Tile tile = BuildTile(it);
+                _list.Items.Add(tile.Root);
+                pending.Enqueue(Tuple.Create(it, tile));
             }
             UpdateCount();
+            LoadThumbs(gen, pending);
+        }
+
+        // Una ficha de la grilla: foto con el color del marco, check, nombre del tipo y de la familia
+        private class Tile
+        {
+            public Border Root, Frame;
+            public Image Img, Big;
+            public TextBlock Placeholder;
+        }
+
+        private Tile BuildTile(TypeItem item)
+        {
+            var t = new Tile
+            {
+                Img = new Image { Stretch = Stretch.Uniform },
+                Big = new Image { Width = 280, Stretch = Stretch.Uniform },
+                Placeholder = new TextBlock
+                {
+                    Text = "…",
+                    Foreground = Brushes.Gray,
+                    FontSize = 10,
+                    TextAlignment = TextAlignment.Center,
+                    TextWrapping = TextWrapping.Wrap,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                }
+            };
+
+            var picture = new Grid { Width = 92, Height = 92, Background = Brushes.White };
+            picture.Children.Add(t.Placeholder);
+            picture.Children.Add(t.Img);
+            t.Frame = new Border
+            {
+                BorderThickness = new Thickness(3),
+                BorderBrush = Brushes.Gainsboro,
+                Child = picture,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
+            var check = new CheckBox
+            {
+                Margin = new Thickness(1),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                IsHitTestVisible = false   // el clic lo maneja toda la ficha
+            };
+            var top = new Grid();
+            top.Children.Add(t.Frame);
+            top.Children.Add(check);
+
+            // "Familia : Tipo" → tipo en negrita, familia abajo en gris
+            int sep = item.Label.LastIndexOf(" : ", StringComparison.Ordinal);
+            string family = sep > 0 ? item.Label.Substring(0, sep) : item.Label;
+            string type = sep > 0 ? item.Label.Substring(sep + 3) : "";
+
+            var text = new StackPanel { Margin = new Thickness(0, 4, 0, 0) };
+            text.Children.Add(new TextBlock { Text = type, FontWeight = FontWeights.SemiBold, FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis, TextAlignment = TextAlignment.Center });
+            text.Children.Add(new TextBlock { Text = family, Foreground = Brushes.Gray, FontSize = 10, TextTrimming = TextTrimming.CharacterEllipsis, TextAlignment = TextAlignment.Center });
+
+            var stack = new StackPanel();
+            stack.Children.Add(top);
+            stack.Children.Add(text);
+
+            t.Root = new Border
+            {
+                Width = 118,
+                Margin = new Thickness(3),
+                Padding = new Thickness(5),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(4),
+                Background = TileBrush,
+                Cursor = Cursors.Hand,
+                Child = stack
+            };
+
+            var tip = new StackPanel();
+            tip.Children.Add(t.Big);
+            tip.Children.Add(new TextBlock { Text = item.Label, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0) });
+            tip.Children.Add(new TextBlock { Text = item.Kind, Foreground = Brushes.Gray });
+            t.Root.ToolTip = tip;
+            ToolTipService.SetInitialShowDelay(t.Root, 300);
+
+            void Paint()
+            {
+                t.Root.BorderBrush = item.IsChecked ? CheckedBrush : Brushes.Transparent;
+                check.IsChecked = item.IsChecked;
+            }
+            Paint();
+            t.Root.MouseLeftButtonUp += (s, e) => { item.IsChecked = !item.IsChecked; Paint(); UpdateCount(); };
+
+            return t;
+        }
+
+        // Carga las miniaturas de a una en segundo plano, para que la ventana abra al instante
+        private void LoadThumbs(int gen, Queue<Tuple<TypeItem, Tile>> pending)
+        {
+            if (_thumbs == null)
+            {
+                foreach (var p in pending) p.Item2.Placeholder.Text = "";
+                return;
+            }
+
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            {
+                if (gen != _refreshGen || pending.Count == 0) return;
+                var p = pending.Dequeue();
+                Thumb thumb = _thumbs(p.Item1.Id);
+                Tile tile = p.Item2;
+                tile.Img.Source = thumb?.Image;
+                tile.Big.Source = thumb?.Image;
+                tile.Placeholder.Text = thumb?.Image == null ? "no preview" : "";
+                if (thumb?.Frame != null) tile.Frame.BorderBrush = new SolidColorBrush(thumb.Frame.Value);
+                LoadThumbs(gen, pending);
+            }));
         }
 
         private void UpdateCount() => _countLabel.Content = $"{_items.Count(i => i.IsChecked)} type(s) checked";
