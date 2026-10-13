@@ -38,3 +38,5 @@ jobs:
             ArtworkPlacer.png
             TvPlacer.png
             AlignHeights.png
+            Install.bat
+            Uninstall.bat

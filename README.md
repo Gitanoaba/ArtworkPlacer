@@ -1,18 +1,28 @@
 # ArtworkPlacer
 
-Revit 2024 add-in that automatically places artwork on walls and TVs in meeting rooms.
+Revit 2024 add-in that automatically places artwork on walls and TVs in meeting rooms, and lines up artwork heights.
 
 ## Place Artwork
 
 When you click **Place Artwork** (in the **Qbiq Tools** tab):
 
 1. Takes the walls you selected (or lets you pick them)
-2. Lets you choose an artwork collection: one per `Artwork_*` section in the template (HQ, Qbiq, Instant, Empty frames…)
+2. Lets you choose an artwork collection: one per `Artwork_*` section in the template (HQ, Qbiq, Instant, Empty frames…). Each type shows a thumbnail of its actual photo
 3. Finds the free space on each wall, avoiding doors, windows, openings, joining walls and anything already hung there
 4. Shows arrows on the face where each piece will go. Click a wall to switch it to the other face (or both)
-5. Places the artwork centered on the free space at the chosen height, rotating through the collection's types
+5. Places the artwork centered on the free space at the chosen height (by center, bottom edge or top edge), rotating through the collection's types
 
 On long walls it can place several pieces, evenly spaced. Everything it places gets `ArtworkPlacer` in **Comments**, and the whole run is a single Undo.
+
+## Align Heights
+
+Fixes artwork that is already placed so every piece sits at the same height. It only moves pieces up or down, never along the wall.
+
+- With pieces selected, it aligns those
+- With nothing selected, it aligns all the artwork visible in the active view (the sample pieces in the `Artwork_*` sections are left alone)
+- Align by **center**, **bottom edge** or **top edge**, measured from each wall's level
+
+Heights are measured from the visible artwork only, ignoring hidden lines and helper geometry inside the family.
 
 ## Place TV
 
@@ -30,41 +40,24 @@ Every TV it places gets `TvPlacer` in **Comments**. Rooms that already have a TV
 
 ## Installation
 
-### 1. Download the files
+You need the install package (a folder with `Install.bat`, `ArtworkPlacer.dll`, `ArtworkPlacer.addin` and the button icons).
 
-From the latest [release](../../releases/latest), download:
+1. **Close Revit**
+2. If you got the package as a `.zip`, extract it first (right-click → **Extract All**)
+3. Double-click **`Install.bat`**
+4. Open Revit: you'll see the **Qbiq Tools** tab with **Place Artwork**, **Align Heights** and **Place TV**
 
-- `ArtworkPlacer.dll`
-- `ArtworkPlacer.addin`
-- `ArtworkPlacer.png` and `TvPlacer.png` (button icons)
+`Install.bat` copies the files to `%APPDATA%\Autodesk\Revit\Addins\2024` and unblocks them, so Windows doesn't block the DLL. To update, run the new package's `Install.bat` the same way. To remove the tools, run `Uninstall.bat`.
 
-### 2. Close Revit
+<details>
+<summary>Manual install (without Install.bat)</summary>
 
-Make sure Revit is completely closed before installing.
+1. Close Revit
+2. Copy `ArtworkPlacer.dll`, `ArtworkPlacer.addin` and the `.png` icons to `%APPDATA%\Autodesk\Revit\Addins\2024` (paste that path in the Windows Explorer address bar)
+3. Right-click `ArtworkPlacer.dll` → **Properties** → check **Unblock** → **OK**
+4. Open Revit
 
-### 3. Copy the files
-
-Copy the files to:
-
-```
-%APPDATA%\Autodesk\Revit\Addins\2024
-```
-
-(Paste that path in the Windows Explorer address bar and press Enter.)
-
-### 4. Unblock the DLL
-
-Windows may block DLLs downloaded from the internet:
-
-1. Right-click `ArtworkPlacer.dll` → **Properties**
-2. Check **Unblock** at the bottom
-3. Click **OK**
-
-> If there's no "Unblock" checkbox, the file is already unblocked.
-
-### 5. Open Revit
-
-You'll see the **Qbiq Tools** tab with the **Place Artwork** and **Place TV** buttons.
+</details>
 
 ---
 
@@ -72,7 +65,7 @@ You'll see the **Qbiq Tools** tab with the **Place Artwork** and **Place TV** bu
 
 1. Open a plan or 3D view and select the walls
 2. Click **Place Artwork**
-3. Pick a **Collection** (or check types by hand), the center height and the spacing options
+3. Pick a **Collection** (or click the thumbnails to choose types by hand; hover to see a piece larger), the height and the spacing options
 4. Check the arrows. Click any wall (or its arrow) to cycle: other face → both faces → original face
 5. Press **ESC** and choose **Place artwork**
 
@@ -83,13 +76,24 @@ Gray arrows mean there's no room on that face (or it already has artwork), so it
 | Option | Default | What it does |
 |---|---|---|
 | Collection | All placeable types | Uses the artwork types shown in an `Artwork_*` section, in left-to-right order |
-| Artwork center height | 150 cm | Height of the piece's center above the wall's level. Uncheck to use the family's Default Elevation |
+| Height | Center at 150 cm | **Center at** / **Bottom edge at** (110 cm) / **Top edge at** (200 cm), measured from the wall's level. **Family default height** uses the family's own Default Elevation |
 | Min. clearance to doors/corners | 30 cm | Free space kept around doors, windows, openings and wall ends |
 | Initial wall face | Auto | Auto picks the face toward a room (the larger room if both sides have one) |
 | Multiple pieces on long walls | On | Fills long walls with evenly spaced pieces |
 | Min. gap between pieces | 60 cm | Minimum space between neighboring pieces |
 | Max. pieces per wall face | 3 | Upper limit per face |
 | Preview faces with arrows | On | Shows the arrows so you can check and switch faces before placing |
+
+---
+
+## How to use Align Heights
+
+1. Select the artwork pieces to fix, or select nothing to fix all the artwork in the active view
+2. Click **Align Heights**
+3. Choose **center**, **bottom edge** or **top edge** and the height
+4. Click **Align heights**. A report says how many pieces moved
+
+It's a single Undo, and it remembers the height for the next **Place Artwork**.
 
 ---
 
@@ -131,6 +135,9 @@ Make sure the files are in the Addins folder above and that Revit was restarted 
 **"Could not load file or assembly" error on startup**
 Windows blocked the DLL. Right-click `ArtworkPlacer.dll` → Properties → check **Unblock** → OK → restart Revit.
 
+**Thumbnails show a gray frame or "no preview"**
+The photo comes from the texture of the type's photo material, looked up in the same folders Revit uses for textures (Options → Rendering → Additional render appearance paths). If that folder isn't set up on your computer, you see the family preview instead. Placing still works the same.
+
 **The Collection list is empty**
 The project has no section views with "Artwork" in the name, or those sections don't show any artwork. Use **All placeable types** and check the types by hand.
 
@@ -154,4 +161,4 @@ Click the wall you want in the preview. Doors are found by their position, so a 
 dotnet build ArtworkPlacer.csproj -c Release
 ```
 
-Uses the Revit 2024 API from `C:\Program Files\Autodesk\Revit 2024` when installed, or the `Nice3point.Revit.Api` NuGet packages otherwise (CI). Pushing a `v*` tag builds a GitHub release with the DLL, `.addin` and icon.
+Uses the Revit 2024 API from `C:\Program Files\Autodesk\Revit 2024` when installed, or the `Nice3point.Revit.Api` NuGet packages otherwise (CI). Pushing a `v*` tag builds a GitHub release with the DLL, `.addin`, icons and the install scripts.
