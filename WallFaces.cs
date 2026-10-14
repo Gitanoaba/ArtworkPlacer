@@ -1,351 +1,480 @@
-using Autodesk.Revit.DB;
-using Autodesk.Revit.DB.Architecture;
-using Autodesk.Revit.DB.Structure;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Architecture;
+using Autodesk.Revit.DB.Structure;
 
-namespace ArtworkPlacer
+namespace ArtworkPlacer;
+
+internal abstract class WallFaces
 {
-    // ─── GEOMETRÍA COMÚN DE MUROS ────────────────────────────────────────────
-    // Caras de un muro, obstáculos, tramos libres y creación de instancias.
-    // La usan Place Artwork (WallPlacer) y Place TV (TvPlacer).
-    internal abstract class WallFaces
-    {
-        protected const double Eps = 0.01;               // pies
+	protected class Side
+	{
+		public int Sign;
 
-        protected readonly Document _doc;
-        protected readonly List<FamilySymbol> _symbols;
-        protected readonly double _clearance;
-        protected readonly Phase _phase;
-        protected readonly Dictionary<ElementId, double> _widths = new Dictionary<ElementId, double>();   // ancho real de cada tipo (-1 = no se pudo colocar)
+		public double V;
 
-        private readonly string _marker;                  // se escribe en Comments de cada pieza colocada
-        private readonly HashSet<ElementId> _ownFamilyIds;
-        private readonly Dictionary<ElementId, List<FamilyInstance>> _hostedByWall;
-        private readonly List<FamilyInstance> _looseOwn;  // piezas nuestras sin muro host (familias sueltas)
+		public List<Reference> Refs = new List<Reference>();
 
-        protected XYZ _p0, _d, _n;
+		public List<PlanarFace> Faces = new List<PlanarFace>();
 
-        protected WallFaces(Document doc, List<FamilySymbol> symbols, double clearance, string marker)
-        {
-            _doc = doc;
-            _symbols = symbols;
-            _clearance = clearance;
-            _marker = marker;
-            _ownFamilyIds = new HashSet<ElementId>(symbols.Select(s => s.Family.Id));
+		public List<Tuple<double, double>> Blocked = new List<Tuple<double, double>>();
 
-            ElementId phaseId = doc.ActiveView?.get_Parameter(BuiltInParameter.VIEW_PHASE)?.AsElementId();
-            _phase = phaseId != null ? doc.GetElement(phaseId) as Phase : null;
+		public List<Tuple<double, double>> Existing = new List<Tuple<double, double>>();
 
-            var instances = new FilteredElementCollector(doc)
-                .OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>()
-                .ToList();
-            _hostedByWall = instances
-                .Where(fi => fi.Host is Wall)
-                .GroupBy(fi => fi.Host.Id)
-                .ToDictionary(g => g.Key, g => g.ToList());
-            _looseOwn = instances.Where(fi => !(fi.Host is Wall) && IsOwn(fi)).ToList();
-        }
+		public bool HasExisting => Existing.Count > 0;
 
-        private bool IsOwn(FamilyInstance fi) =>
-            _ownFamilyIds.Contains(fi.Symbol.Family.Id) ||
-            fi.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() == _marker;
+		public string Name
+		{
+			get
+			{
+				if (Sign <= 0)
+				{
+					return "interior face";
+				}
+				return "exterior face";
+			}
+		}
+	}
 
-        protected void Mark(FamilyInstance fi) =>
-            fi.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set(_marker);
+	protected class Box
+	{
+		public double U0;
 
-        // Geometría de una cara del muro: +1 = exterior, -1 = interior
-        protected class Side
-        {
-            public int Sign;
-            public double V;                                   // posición de la cara sobre la normal
-            public List<Reference> Refs = new List<Reference>();
-            public List<PlanarFace> Faces = new List<PlanarFace>();
-            public List<Tuple<double, double>> Blocked = new List<Tuple<double, double>>();
-            public List<Tuple<double, double>> Existing = new List<Tuple<double, double>>();   // tramos con piezas nuestras ya colocadas
-            public bool HasExisting => Existing.Count > 0;
-            public string Name => Sign > 0 ? "exterior face" : "interior face";
-        }
+		public double U1;
 
-        // Caja del elemento en coordenadas locales del muro: U a lo largo, V normal, Z vertical
-        protected class Box { public double U0, U1, V0, V1, Z0, Z1; }
+		public double V0;
 
-        // Resultado del análisis de un muro (deja _p0/_d/_n listos para LocalBox)
-        protected class WallGeom
-        {
-            public Level Level;
-            public double Length;
-            public double RefZ;                                // altura de referencia para obstáculos y flechas
-            public Dictionary<int, Side> Sides = new Dictionary<int, Side>();
-        }
+		public double V1;
 
-        // refHeight: altura sobre el nivel donde se buscan obstáculos y se dibujan las flechas
-        protected WallGeom Analyze(Wall wall, double refHeight, out string error)
-        {
-            error = null;
-            if (wall.WallType.Kind != WallKind.Basic) { error = "curtain/stacked walls are not supported"; return null; }
-            if (!(wall.Location is LocationCurve lc) || !(lc.Curve is Line line)) { error = "curved walls are not supported"; return null; }
-            if (!(_doc.GetElement(wall.LevelId) is Level level)) { error = "wall has no level"; return null; }
+		public double Z0;
 
-            _p0 = line.GetEndPoint(0);
-            _d = line.Direction;
-            _n = wall.Orientation;                 // apunta hacia la cara exterior
+		public double Z1;
+	}
 
-            var g = new WallGeom
-            {
-                Level = level,
-                Length = line.Length,
-                RefZ = level.ProjectElevation + refHeight
-            };
-            AddSide(wall, ShellLayerType.Exterior, +1, g.Sides);
-            AddSide(wall, ShellLayerType.Interior, -1, g.Sides);
-            if (g.Sides.Count == 0) { error = "no planar faces found"; return null; }
+	protected class WallGeom
+	{
+		public Level Level;
 
-            CollectObstacles(wall, g.Sides, g.RefZ, g.Length);
-            return g;
-        }
+		public double Length;
 
-        private void AddSide(Wall wall, ShellLayerType shell, int sign, Dictionary<int, Side> sides)
-        {
-            IList<Reference> refs;
-            try { refs = HostObjectUtils.GetSideFaces(wall, shell); }
-            catch { return; }
+		public double RefZ;
 
-            var side = new Side { Sign = sign };
-            foreach (Reference r in refs)
-            {
-                if (wall.GetGeometryObjectFromReference(r) is PlanarFace f)
-                {
-                    side.Refs.Add(r);
-                    side.Faces.Add(f);
-                }
-            }
-            if (side.Faces.Count == 0) return;
-            side.V = (side.Faces[0].Origin - _p0).DotProduct(_n);
-            sides[sign] = side;
-        }
+		public Dictionary<int, Side> Sides = new Dictionary<int, Side>();
+	}
 
-        // Puertas, ventanas, aberturas, cosas ya colgadas en el muro y muros que lo tocan
-        private void CollectObstacles(Wall wall, Dictionary<int, Side> sides, double refZ, double length)
-        {
-            var insertIds = new HashSet<ElementId>(wall.FindInserts(true, false, true, true));
+	protected const double Eps = 0.01;
 
-            foreach (ElementId id in insertIds)
-            {
-                Box b = LocalBox(_doc.GetElement(id));
-                if (b == null) continue;
-                foreach (Side s in sides.Values) s.Blocked.Add(Tuple.Create(b.U0, b.U1));
-            }
+	protected readonly Document _doc;
 
-            if (_hostedByWall.TryGetValue(wall.Id, out var hosted))
-            {
-                foreach (FamilyInstance fi in hosted)
-                {
-                    if (insertIds.Contains(fi.Id)) continue;
-                    Box b = LocalBox(fi);
-                    if (b == null) continue;
-                    bool own = IsOwn(fi);
-                    foreach (Side s in AffectedSides(b, sides, true))
-                    {
-                        s.Blocked.Add(Tuple.Create(b.U0, b.U1));
-                        if (own) s.Existing.Add(Tuple.Create(b.U0, b.U1));
-                    }
-                }
-            }
+	protected readonly List<FamilySymbol> _symbols;
 
-            BoundingBoxXYZ wb = wall.get_BoundingBox(null);
-            if (wb == null) return;
+	protected readonly double _clearance;
 
-            // Piezas nuestras sueltas (sin host) apoyadas contra una cara de este muro
-            foreach (FamilyInstance fi in _looseOwn)
-            {
-                Box b = LocalBox(fi);
-                if (b == null || b.U1 < 0 || b.U0 > length || b.Z1 < wb.Min.Z || b.Z0 > wb.Max.Z) continue;
-                foreach (Side s in sides.Values)
-                {
-                    bool touches = s.Sign > 0
-                        ? b.V1 > s.V + Eps && b.V0 < s.V + 0.5
-                        : b.V0 < s.V - Eps && b.V1 > s.V - 0.5;
-                    if (!touches) continue;
-                    s.Blocked.Add(Tuple.Create(b.U0, b.U1));
-                    s.Existing.Add(Tuple.Create(b.U0, b.U1));
-                }
-            }
+	protected readonly Phase _phase;
 
-            var pad = new XYZ(0.1, 0.1, 0.1);
-            var others = new FilteredElementCollector(_doc)
-                .OfClass(typeof(Wall))
-                .WherePasses(new BoundingBoxIntersectsFilter(new Outline(wb.Min - pad, wb.Max + pad)))
-                .Where(e => e.Id != wall.Id && !insertIds.Contains(e.Id));
+	protected readonly Dictionary<ElementId, double> _widths = new Dictionary<ElementId, double>();
 
-            foreach (Element other in others)
-            {
-                Box b = LocalBox(other);
-                if (b == null || b.Z0 > refZ || b.Z1 < refZ) continue;
-                foreach (Side s in AffectedSides(b, sides, false))
-                    s.Blocked.Add(Tuple.Create(b.U0, b.U1));
-            }
-        }
+	private readonly string _marker;
 
-        // Una caja bloquea una cara si sobresale de ella; si queda dentro del muro, opcionalmente bloquea ambas
-        private static IEnumerable<Side> AffectedSides(Box b, Dictionary<int, Side> sides, bool insideBlocksBoth)
-        {
-            var hit = new List<Side>();
-            if (sides.TryGetValue(+1, out Side ext) && b.V1 > ext.V + Eps) hit.Add(ext);
-            if (sides.TryGetValue(-1, out Side inn) && b.V0 < inn.V - Eps) hit.Add(inn);
-            if (hit.Count == 0 && insideBlocksBoth) hit.AddRange(sides.Values);
-            return hit;
-        }
+	private readonly HashSet<ElementId> _ownFamilyIds;
 
-        // La cara que mira hacia un room; si hay rooms en ambos lados, el más grande. null = sin rooms
-        protected Side RoomSide(WallGeom g)
-        {
-            XYZ mid = _p0 + _d * (g.Length / 2);
-            double z = g.Level.ProjectElevation + 3.0;
-            Side best = null;
-            double bestArea = -1;
-            foreach (Side s in g.Sides.Values)
-            {
-                XYZ probe = mid + _n * (s.V + s.Sign * 1.0);
-                probe = new XYZ(probe.X, probe.Y, z);
-                Room room = _phase != null ? _doc.GetRoomAtPoint(probe, _phase) : _doc.GetRoomAtPoint(probe);
-                if (room != null && room.Area > bestArea) { best = s; bestArea = room.Area; }
-            }
-            return best;
-        }
+	private readonly Dictionary<ElementId, List<FamilyInstance>> _hostedByWall;
 
-        // Tramos libres de la cara entre from y to, del más largo al más corto
-        protected List<Tuple<double, double>> FreeSegments(double from, double to, List<Tuple<double, double>> blocked)
-        {
-            var intervals = blocked
-                .Select(b => Tuple.Create(Math.Max(from, b.Item1 - _clearance), Math.Min(to, b.Item2 + _clearance)))
-                .Where(b => b.Item2 > b.Item1)
-                .OrderBy(b => b.Item1);
+	private readonly List<FamilyInstance> _looseOwn;
 
-            var free = new List<Tuple<double, double>>();
-            double cursor = from + _clearance;
-            foreach (var iv in intervals)
-            {
-                if (iv.Item1 - cursor > Eps) free.Add(Tuple.Create(cursor, iv.Item1));
-                cursor = Math.Max(cursor, iv.Item2);
-            }
-            if (to - _clearance - cursor > Eps) free.Add(Tuple.Create(cursor, to - _clearance));
-            return free.OrderByDescending(f => f.Item2 - f.Item1).ToList();
-        }
+	protected XYZ _p0;
 
-        protected XYZ PointOnFace(Level level, Side side, double u, double heightAboveLevel)
-        {
-            XYZ onFace = _p0 + _d * u + _n * side.V;
-            return new XYZ(onFace.X, onFace.Y, level.ProjectElevation + heightAboveLevel);
-        }
+	protected XYZ _d;
 
-        // Coloca el tipo, lee su caja y lo borra: devuelve el ancho a lo largo del muro (-1 = no se pudo)
-        protected double Measure(FamilySymbol sym, Wall wall, WallGeom g, Side side, double u, double heightAboveLevel)
-        {
-            try
-            {
-                FamilyInstance fi = Create(sym, wall, g.Level, side, PointOnFace(g.Level, side, u, heightAboveLevel), _n * side.Sign);
-                if (fi == null) return -1;
-                _doc.Regenerate();
-                Box box = PieceBox(fi);
-                _doc.Delete(fi.Id);
-                return box == null ? -1 : box.U1 - box.U0;
-            }
-            catch
-            {
-                return -1;
-            }
-        }
+	protected XYZ _n;
 
-        protected FamilyInstance Create(FamilySymbol sym, Wall wall, Level level, Side side, XYZ pt, XYZ faceN)
-        {
-            switch (sym.Family.FamilyPlacementType)
-            {
-                case FamilyPlacementType.WorkPlaneBased:
-                {
-                    // Elegir la cara que contiene el punto (un muro puede tener la cara partida)
-                    Reference faceRef = side.Refs[0];
-                    for (int i = 0; i < side.Faces.Count; i++)
-                        if (side.Faces[i].Project(pt) != null) { faceRef = side.Refs[i]; break; }
+	protected WallFaces(Document doc, List<FamilySymbol> symbols, double clearance, string marker)
+	{
+		_doc = doc;
+		_symbols = symbols;
+		_clearance = clearance;
+		_marker = marker;
+		_ownFamilyIds = new HashSet<ElementId>(symbols.Select((FamilySymbol s) => s.Family.Id));
+		ElementId elementId = ((Element)doc.ActiveView)?.get_Parameter(BuiltInParameter.VIEW_PHASE)?.AsElementId();
+		_phase = ((elementId != null) ? (doc.GetElement(elementId) as Phase) : null);
+		List<FamilyInstance> source = new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().ToList();
+		_hostedByWall = (from fi in source
+			where fi.Host is Wall
+			group fi by fi.Host.Id).ToDictionary((IGrouping<ElementId, FamilyInstance> g) => g.Key, (IGrouping<ElementId, FamilyInstance> g) => g.ToList());
+		_looseOwn = source.Where((FamilyInstance fi) => !(fi.Host is Wall) && IsOwn(fi)).ToList();
+	}
 
-                    // X de la familia horizontal, Y hacia arriba
-                    XYZ refDir = XYZ.BasisZ.CrossProduct(faceN);
-                    return _doc.Create.NewFamilyInstance(faceRef, pt, refDir, sym);
-                }
+	private bool IsOwn(FamilyInstance fi)
+	{
+		if (!_ownFamilyIds.Contains(fi.Symbol.Family.Id))
+		{
+			return ((Element)fi).get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() == _marker;
+		}
+		return true;
+	}
 
-                case FamilyPlacementType.OneLevelBasedHosted:
-                {
-                    FamilyInstance fi = _doc.Create.NewFamilyInstance(pt, sym, wall, level, StructuralType.NonStructural);
-                    _doc.Regenerate();
-                    if (fi.FacingOrientation.DotProduct(faceN) < 0 && fi.CanFlipFacing) fi.flipFacing();
-                    return fi;
-                }
+	protected void Mark(FamilyInstance fi)
+	{
+		((Element)fi).get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set(_marker);
+	}
 
-                case FamilyPlacementType.OneLevelBased:
-                {
-                    XYZ basePt = new XYZ(pt.X, pt.Y, level.ProjectElevation);
-                    FamilyInstance fi = _doc.Create.NewFamilyInstance(basePt, sym, level, StructuralType.NonStructural);
-                    fi.get_Parameter(BuiltInParameter.INSTANCE_ELEVATION_PARAM)?.Set(pt.Z - level.ProjectElevation);
-                    _doc.Regenerate();
-                    double angle = fi.FacingOrientation.AngleOnPlaneTo(faceN, XYZ.BasisZ);
-                    if (Math.Abs(angle) > 1e-6)
-                        ElementTransformUtils.RotateElement(_doc, fi.Id, Line.CreateBound(basePt, basePt + XYZ.BasisZ), angle);
-                    return fi;
-                }
-            }
-            return null;
-        }
+	protected WallGeom Analyze(Wall wall, double refHeight, out string error)
+	{
+		error = null;
+		if (wall.WallType.Kind != WallKind.Basic)
+		{
+			error = "curtain/stacked walls are not supported";
+			return null;
+		}
+		if (!(wall.Location is LocationCurve { Curve: Line curve }))
+		{
+			error = "curved walls are not supported";
+			return null;
+		}
+		if (!(_doc.GetElement(wall.LevelId) is Level level))
+		{
+			error = "wall has no level";
+			return null;
+		}
+		_p0 = curve.GetEndPoint(0);
+		_d = curve.Direction;
+		_n = wall.Orientation;
+		WallGeom wallGeom = new WallGeom
+		{
+			Level = level,
+			Length = curve.Length,
+			RefZ = level.ProjectElevation + refHeight
+		};
+		AddSide(wall, ShellLayerType.Exterior, 1, wallGeom.Sides);
+		AddSide(wall, ShellLayerType.Interior, -1, wallGeom.Sides);
+		if (wallGeom.Sides.Count == 0)
+		{
+			error = "no planar faces found";
+			return null;
+		}
+		CollectObstacles(wall, wallGeom.Sides, wallGeom.RefZ, wallGeom.Length);
+		return wallGeom;
+	}
 
-        // "Default Elevation" del tipo, si existe
-        protected static double DefaultElevation(FamilySymbol sym)
-        {
-            Parameter p = sym.LookupParameter("Default Elevation");
-            if (p != null && p.StorageType == StorageType.Double) return p.AsDouble();
-            return UnitUtils.ConvertToInternalUnits(150, UnitTypeId.Centimeters);
-        }
+	private void AddSide(Wall wall, ShellLayerType shell, int sign, Dictionary<int, Side> sides)
+	{
+		IList<Reference> sideFaces;
+		try
+		{
+			sideFaces = HostObjectUtils.GetSideFaces(wall, shell);
+		}
+		catch
+		{
+			return;
+		}
+		Side side = new Side
+		{
+			Sign = sign
+		};
+		foreach (Reference item2 in sideFaces)
+		{
+			if (wall.GetGeometryObjectFromReference(item2) is PlanarFace item)
+			{
+				side.Refs.Add(item2);
+				side.Faces.Add(item);
+			}
+		}
+		if (side.Faces.Count != 0)
+		{
+			side.V = (side.Faces[0].Origin - _p0).DotProduct(_n);
+			sides[sign] = side;
+		}
+	}
 
-        protected Box LocalBox(Element e)
-        {
-            BoundingBoxXYZ bb = e?.get_BoundingBox(null);
-            if (bb == null) return null;
+	private void CollectObstacles(Wall wall, Dictionary<int, Side> sides, double refZ, double length)
+	{
+		HashSet<ElementId> insertIds = new HashSet<ElementId>(wall.FindInserts(addRectOpenings: true, includeShadows: false, includeEmbeddedWalls: true, includeSharedEmbeddedInserts: true));
+		foreach (ElementId item in insertIds)
+		{
+			Box box = LocalBox(_doc.GetElement(item));
+			if (box == null)
+			{
+				continue;
+			}
+			foreach (Side value2 in sides.Values)
+			{
+				value2.Blocked.Add(Tuple.Create(box.U0, box.U1));
+			}
+		}
+		if (_hostedByWall.TryGetValue(wall.Id, out var value))
+		{
+			foreach (FamilyInstance item2 in value)
+			{
+				if (insertIds.Contains(item2.Id))
+				{
+					continue;
+				}
+				Box box2 = LocalBox(item2);
+				if (box2 == null)
+				{
+					continue;
+				}
+				bool flag = IsOwn(item2);
+				foreach (Side item3 in AffectedSides(box2, sides, insideBlocksBoth: true))
+				{
+					item3.Blocked.Add(Tuple.Create(box2.U0, box2.U1));
+					if (flag)
+					{
+						item3.Existing.Add(Tuple.Create(box2.U0, box2.U1));
+					}
+				}
+			}
+		}
+		BoundingBoxXYZ boundingBoxXYZ = ((Element)wall).get_BoundingBox((View)null);
+		if (boundingBoxXYZ == null)
+		{
+			return;
+		}
+		foreach (FamilyInstance item4 in _looseOwn)
+		{
+			Box box3 = LocalBox(item4);
+			if (box3 == null || box3.U1 < 0.0 || box3.U0 > length || box3.Z1 < boundingBoxXYZ.Min.Z || box3.Z0 > boundingBoxXYZ.Max.Z)
+			{
+				continue;
+			}
+			foreach (Side value3 in sides.Values)
+			{
+				bool num;
+				if (value3.Sign <= 0)
+				{
+					if (!(box3.V0 < value3.V - 0.01))
+					{
+						continue;
+					}
+					num = box3.V1 > value3.V - 0.5;
+				}
+				else
+				{
+					if (!(box3.V1 > value3.V + 0.01))
+					{
+						continue;
+					}
+					num = box3.V0 < value3.V + 0.5;
+				}
+				if (num)
+				{
+					value3.Blocked.Add(Tuple.Create(box3.U0, box3.U1));
+					value3.Existing.Add(Tuple.Create(box3.U0, box3.U1));
+				}
+			}
+		}
+		XYZ xYZ = new XYZ(0.1, 0.1, 0.1);
+		foreach (Element item5 in from e in new FilteredElementCollector(_doc).OfClass(typeof(Wall)).WherePasses(new BoundingBoxIntersectsFilter(new Outline(boundingBoxXYZ.Min - xYZ, boundingBoxXYZ.Max + xYZ)))
+			where e.Id != wall.Id && !insertIds.Contains(e.Id)
+			select e)
+		{
+			Box box4 = LocalBox(item5);
+			if (box4 == null || box4.Z0 > refZ || box4.Z1 < refZ)
+			{
+				continue;
+			}
+			foreach (Side item6 in AffectedSides(box4, sides, insideBlocksBoth: false))
+			{
+				item6.Blocked.Add(Tuple.Create(box4.U0, box4.U1));
+			}
+		}
+	}
 
-            var corners = new List<XYZ>();
-            for (int i = 0; i < 8; i++)
-            {
-                XYZ c = new XYZ(
-                    (i & 1) == 0 ? bb.Min.X : bb.Max.X,
-                    (i & 2) == 0 ? bb.Min.Y : bb.Max.Y,
-                    (i & 4) == 0 ? bb.Min.Z : bb.Max.Z);
-                corners.Add(bb.Transform.OfPoint(c));
-            }
-            return ToBox(corners);
-        }
+	private static IEnumerable<Side> AffectedSides(Box b, Dictionary<int, Side> sides, bool insideBlocksBoth)
+	{
+		List<Side> list = new List<Side>();
+		if (sides.TryGetValue(1, out var value) && b.V1 > value.V + 0.01)
+		{
+			list.Add(value);
+		}
+		if (sides.TryGetValue(-1, out var value2) && b.V0 < value2.V - 0.01)
+		{
+			list.Add(value2);
+		}
+		if ((list.Count == 0) & insideBlocksBoth)
+		{
+			list.AddRange(sides.Values);
+		}
+		return list;
+	}
 
-        // Caja de lo que se ve de una pieza colocada (sin líneas ni objetos ocultos); se usa para medir y alinear
-        protected Box PieceBox(Element e)
-        {
-            List<XYZ> pts = ArtGeometry.VisiblePoints(e);
-            return pts.Count > 0 ? ToBox(pts) : LocalBox(e);
-        }
+	protected Side RoomSide(WallGeom g)
+	{
+		XYZ xYZ = _p0 + _d * (g.Length / 2.0);
+		double z = g.Level.ProjectElevation + 3.0;
+		Side result = null;
+		double num = -1.0;
+		foreach (Side value in g.Sides.Values)
+		{
+			XYZ xYZ2 = xYZ + _n * (value.V + (double)value.Sign * 1.0);
+			xYZ2 = new XYZ(xYZ2.X, xYZ2.Y, z);
+			Room room = ((_phase != null) ? _doc.GetRoomAtPoint(xYZ2, _phase) : _doc.GetRoomAtPoint(xYZ2));
+			if (room != null && room.Area > num)
+			{
+				result = value;
+				num = room.Area;
+			}
+		}
+		return result;
+	}
 
-        private Box ToBox(IEnumerable<XYZ> points)
-        {
-            var box = new Box
-            {
-                U0 = double.MaxValue, U1 = double.MinValue,
-                V0 = double.MaxValue, V1 = double.MinValue,
-                Z0 = double.MaxValue, Z1 = double.MinValue
-            };
-            foreach (XYZ c in points)
-            {
-                XYZ q = c - _p0;
-                double u = q.DotProduct(_d), v = q.DotProduct(_n);
-                box.U0 = Math.Min(box.U0, u); box.U1 = Math.Max(box.U1, u);
-                box.V0 = Math.Min(box.V0, v); box.V1 = Math.Max(box.V1, v);
-                box.Z0 = Math.Min(box.Z0, c.Z); box.Z1 = Math.Max(box.Z1, c.Z);
-            }
-            return box;
-        }
-    }
+	protected List<Tuple<double, double>> FreeSegments(double from, double to, List<Tuple<double, double>> blocked)
+	{
+		IOrderedEnumerable<Tuple<double, double>> orderedEnumerable = from b in blocked
+			select Tuple.Create(Math.Max(@from, b.Item1 - _clearance), Math.Min(to, b.Item2 + _clearance)) into b
+			where b.Item2 > b.Item1
+			orderby b.Item1
+			select b;
+		List<Tuple<double, double>> list = new List<Tuple<double, double>>();
+		double num = from + _clearance;
+		foreach (Tuple<double, double> item in orderedEnumerable)
+		{
+			if (item.Item1 - num > 0.01)
+			{
+				list.Add(Tuple.Create(num, item.Item1));
+			}
+			num = Math.Max(num, item.Item2);
+		}
+		if (to - _clearance - num > 0.01)
+		{
+			list.Add(Tuple.Create(num, to - _clearance));
+		}
+		return list.OrderByDescending((Tuple<double, double> f) => f.Item2 - f.Item1).ToList();
+	}
+
+	protected XYZ PointOnFace(Level level, Side side, double u, double heightAboveLevel)
+	{
+		XYZ xYZ = _p0 + _d * u + _n * side.V;
+		return new XYZ(xYZ.X, xYZ.Y, level.ProjectElevation + heightAboveLevel);
+	}
+
+	protected double Measure(FamilySymbol sym, Wall wall, WallGeom g, Side side, double u, double heightAboveLevel)
+	{
+		try
+		{
+			FamilyInstance familyInstance = Create(sym, wall, g.Level, side, PointOnFace(g.Level, side, u, heightAboveLevel), _n * side.Sign);
+			if (familyInstance == null)
+			{
+				return -1.0;
+			}
+			_doc.Regenerate();
+			Box box = PieceBox(familyInstance);
+			_doc.Delete(familyInstance.Id);
+			return (box == null) ? (-1.0) : (box.U1 - box.U0);
+		}
+		catch
+		{
+			return -1.0;
+		}
+	}
+
+	protected FamilyInstance Create(FamilySymbol sym, Wall wall, Level level, Side side, XYZ pt, XYZ faceN)
+	{
+		switch (sym.Family.FamilyPlacementType)
+		{
+		case FamilyPlacementType.WorkPlaneBased:
+		{
+			Reference reference = side.Refs[0];
+			for (int i = 0; i < side.Faces.Count; i++)
+			{
+				if (side.Faces[i].Project(pt) != null)
+				{
+					reference = side.Refs[i];
+					break;
+				}
+			}
+			XYZ referenceDirection = XYZ.BasisZ.CrossProduct(faceN);
+			return _doc.Create.NewFamilyInstance(reference, pt, referenceDirection, sym);
+		}
+		case FamilyPlacementType.OneLevelBasedHosted:
+		{
+			FamilyInstance familyInstance2 = _doc.Create.NewFamilyInstance(pt, sym, wall, level, StructuralType.NonStructural);
+			_doc.Regenerate();
+			if (familyInstance2.FacingOrientation.DotProduct(faceN) < 0.0 && familyInstance2.CanFlipFacing)
+			{
+				familyInstance2.flipFacing();
+			}
+			return familyInstance2;
+		}
+		case FamilyPlacementType.OneLevelBased:
+		{
+			XYZ xYZ = new XYZ(pt.X, pt.Y, level.ProjectElevation);
+			FamilyInstance familyInstance = _doc.Create.NewFamilyInstance(xYZ, sym, level, StructuralType.NonStructural);
+			((Element)familyInstance).get_Parameter(BuiltInParameter.INSTANCE_ELEVATION_PARAM)?.Set(pt.Z - level.ProjectElevation);
+			_doc.Regenerate();
+			double num = familyInstance.FacingOrientation.AngleOnPlaneTo(faceN, XYZ.BasisZ);
+			if (Math.Abs(num) > 1E-06)
+			{
+				ElementTransformUtils.RotateElement(_doc, familyInstance.Id, Line.CreateBound(xYZ, xYZ + XYZ.BasisZ), num);
+			}
+			return familyInstance;
+		}
+		default:
+			return null;
+		}
+	}
+
+	protected static double DefaultElevation(FamilySymbol sym)
+	{
+		Parameter parameter = sym.LookupParameter("Default Elevation");
+		if (parameter != null && parameter.StorageType == StorageType.Double)
+		{
+			return parameter.AsDouble();
+		}
+		return UnitUtils.ConvertToInternalUnits(150.0, UnitTypeId.Centimeters);
+	}
+
+	protected Box LocalBox(Element e)
+	{
+		BoundingBoxXYZ boundingBoxXYZ = e?.get_BoundingBox((View)null);
+		if (boundingBoxXYZ == null)
+		{
+			return null;
+		}
+		List<XYZ> list = new List<XYZ>();
+		for (int i = 0; i < 8; i++)
+		{
+			XYZ point = new XYZ(((i & 1) == 0) ? boundingBoxXYZ.Min.X : boundingBoxXYZ.Max.X, ((i & 2) == 0) ? boundingBoxXYZ.Min.Y : boundingBoxXYZ.Max.Y, ((i & 4) == 0) ? boundingBoxXYZ.Min.Z : boundingBoxXYZ.Max.Z);
+			list.Add(boundingBoxXYZ.Transform.OfPoint(point));
+		}
+		return ToBox(list);
+	}
+
+	protected Box PieceBox(Element e)
+	{
+		List<XYZ> list = ArtGeometry.VisiblePoints(e);
+		if (list.Count <= 0)
+		{
+			return LocalBox(e);
+		}
+		return ToBox(list);
+	}
+
+	private Box ToBox(IEnumerable<XYZ> points)
+	{
+		Box box = new Box
+		{
+			U0 = double.MaxValue,
+			U1 = double.MinValue,
+			V0 = double.MaxValue,
+			V1 = double.MinValue,
+			Z0 = double.MaxValue,
+			Z1 = double.MinValue
+		};
+		foreach (XYZ point in points)
+		{
+			XYZ xYZ = point - _p0;
+			double val = xYZ.DotProduct(_d);
+			double val2 = xYZ.DotProduct(_n);
+			box.U0 = Math.Min(box.U0, val);
+			box.U1 = Math.Max(box.U1, val);
+			box.V0 = Math.Min(box.V0, val2);
+			box.V1 = Math.Max(box.V1, val2);
+			box.Z0 = Math.Min(box.Z0, point.Z);
+			box.Z1 = Math.Max(box.Z1, point.Z);
+		}
+		return box;
+	}
 }

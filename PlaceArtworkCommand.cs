@@ -1,516 +1,346 @@
-using Autodesk.Revit.Attributes;
-using Autodesk.Revit.DB;
-using Autodesk.Revit.UI;
-using Autodesk.Revit.UI.Selection;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.Exceptions;
+using Autodesk.Revit.UI;
+using Autodesk.Revit.UI.Selection;
 
-namespace ArtworkPlacer
+namespace ArtworkPlacer;
+
+[Transaction(TransactionMode.Manual)]
+public class PlaceArtworkCommand : IExternalCommand
 {
-    // ─── COMANDO PRINCIPAL ───────────────────────────────────────────────────
-    [Transaction(TransactionMode.Manual)]
-    public class PlaceArtworkCommand : IExternalCommand
-    {
-        private const string ToolName = "Place Artwork";
-
-        // Se recuerdan entre corridas dentro de la misma sesión de Revit
-        private static readonly DialogSettings _settings = new DialogSettings();
-        internal static DialogSettings Settings => _settings;   // Align Heights usa la misma altura
-
-        // Valores por defecto en las unidades del proyecto (se calculan una vez por sesión)
-        internal static void InitDefaults(Func<double, string> fmt)
-        {
-            string Cm(double cm) => fmt(UnitUtils.ConvertToInternalUnits(cm, UnitTypeId.Centimeters));
-            if (_settings.HeightDefaults == null) _settings.HeightDefaults = new[] { Cm(150), Cm(110), Cm(200) };
-            if (_settings.HeightText == null) _settings.HeightText = _settings.HeightDefaults[0];
-            if (_settings.ClearText == null) _settings.ClearText = Cm(30);
-            if (_settings.GapText == null) _settings.GapText = Cm(60);
-        }
-
-        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
-        {
-            UIDocument uidoc = commandData.Application.ActiveUIDocument;
-            if (uidoc == null || uidoc.Document.IsFamilyDocument)
-            {
-                TaskDialog.Show(ToolName, "Open a project (not a family) to use this tool.");
-                return Result.Cancelled;
-            }
-            Document doc = uidoc.Document;
-
-            List<Wall> walls = GetWalls(uidoc, "Select the walls to place artwork on, then click Finish");
-            if (walls == null) return Result.Cancelled;
-            if (walls.Count == 0)
-            {
-                TaskDialog.Show(ToolName, "No walls were selected.");
-                return Result.Cancelled;
-            }
-
-            // Longitudes en las unidades del proyecto (cm, m, pies…)
-            Units units = doc.GetUnits();
-            Func<string, double?> parse = s => UnitFormatUtils.TryParse(units, SpecTypeId.Length, s, out double v) ? v : (double?)null;
-            string Fmt(double ft) => UnitFormatUtils.Format(units, SpecTypeId.Length, ft, false);
-            InitDefaults(Fmt);
-
-            Func<FamilySymbol, bool> isDefault = s => LooksLikeArtwork(s.FamilyName);
-            Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa = paths =>
-            {
-                HashSet<long> newIds = LoadFamilies(doc, paths, "Load artwork families");
-                return Tuple.Create(CollectTypes(doc, isDefault, _settings.LastChecked), newIds);
-            };
-
-            List<TypeItem> types = CollectTypes(doc, isDefault, _settings.LastChecked);
-            var thumbs = new TypeThumbnails(doc, commandData.Application.Application.VersionNumber);
-            var dlg = new ArtworkDialog(walls.Count, types, CollectCollections(doc, types), _settings, parse, loadRfa, thumbs.Get);
-            if (dlg.ShowDialog() != true) return Result.Cancelled;
-
-            List<FamilySymbol> symbols = dlg.SelectedIds
-                .Select(id => doc.GetElement(new ElementId(id)) as FamilySymbol)
-                .Where(s => s != null)
-                .ToList();
-
-            var placer = new WallPlacer(doc, symbols, dlg.ArtHeight, dlg.Align, dlg.Clearance, dlg.Gap, dlg.MaxPerFace, _settings.Side, Fmt);
-            var placedIds = new List<ElementId>();
-            var skipped = new List<string>();
-
-            // Cara inicial de cada muro (luego se puede cambiar muro por muro en la vista previa)
-            var choice = new Dictionary<ElementId, List<int>>();
-            foreach (Wall wall in walls)
-            {
-                List<int> signs = placer.InitialSides(wall, out string error);
-                if (signs == null) skipped.Add($"{WallLabel(wall)}: {error}");
-                else choice[wall.Id] = signs;
-            }
-            walls = walls.Where(w => choice.ContainsKey(w.Id)).ToList();
-            if (walls.Count == 0)
-            {
-                TaskDialog.Show(ToolName, "None of the selected walls can be used:\n\n" + string.Join("\n", skipped));
-                return Result.Cancelled;
-            }
-
-            if (_settings.Preview && !new SidePreview(uidoc, placer, walls, choice, ToolName).Run())
-                return Result.Cancelled;
-
-            using (var t = new Transaction(doc, "Place artwork"))
-            {
-                SwallowWarnings(t);
-                t.Start();
-
-                foreach (FamilySymbol s in symbols)
-                    if (!s.IsActive) s.Activate();
-                doc.Regenerate();
-
-                foreach (Wall wall in walls)
-                {
-                    using (var st = new SubTransaction(doc))
-                    {
-                        st.Start();
-                        try
-                        {
-                            placedIds.AddRange(placer.PlaceOnWall(wall, choice[wall.Id], skipped));
-                            st.Commit();
-                        }
-                        catch (Exception ex)
-                        {
-                            st.RollBack();
-                            skipped.Add($"{WallLabel(wall)}: error – {ex.Message}");
-                        }
-                    }
-                }
-
-                t.Commit();
-            }
-
-            if (placedIds.Count > 0)
-                uidoc.Selection.SetElementIds(placedIds);
-
-            var report = new TaskDialog(ToolName)
-            {
-                MainInstruction = $"Placed {placedIds.Count} artwork piece(s) on {walls.Count} wall(s).",
-                MainContent = skipped.Count == 0
-                    ? "The new pieces are selected so you can review them."
-                    : $"{skipped.Count} wall face(s) were skipped (see details). The new pieces are selected.",
-                ExpandedContent = string.Join("\n", skipped)
-            };
-            report.Show();
-
-            return Result.Succeeded;
-        }
-
-        internal static string WallLabel(Wall w) => $"Wall {w.Id.Value} ({w.Name})";
-
-        // Muros preseleccionados, o pedir selección
-        internal static List<Wall> GetWalls(UIDocument uidoc, string prompt)
-        {
-            Document doc = uidoc.Document;
-            var pre = uidoc.Selection.GetElementIds()
-                .Select(id => doc.GetElement(id)).OfType<Wall>().ToList();
-            if (pre.Count > 0) return pre;
-
-            try
-            {
-                var refs = uidoc.Selection.PickObjects(ObjectType.Element, new WallFilter(), prompt);
-                return refs.Select(r => doc.GetElement(r)).OfType<Wall>()
-                    .GroupBy(w => w.Id).Select(g => g.First()).ToList();
-            }
-            catch (Autodesk.Revit.Exceptions.OperationCanceledException)
-            {
-                return null;
-            }
-        }
-
-        // Carga .rfa (o encuentra la familia si ya estaba cargada) y devuelve los ids de sus tipos
-        internal static HashSet<long> LoadFamilies(Document doc, string[] paths, string transactionName)
-        {
-            var newIds = new HashSet<long>();
-            using (var t = new Transaction(doc, transactionName))
-            {
-                t.Start();
-                foreach (string path in paths)
-                {
-                    Family fam;
-                    if (!doc.LoadFamily(path, out fam))
-                    {
-                        // Ya estaba cargada: marcar sus tipos igual
-                        string name = Path.GetFileNameWithoutExtension(path);
-                        fam = new FilteredElementCollector(doc).OfClass(typeof(Family)).Cast<Family>()
-                            .FirstOrDefault(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-                    }
-                    if (fam != null)
-                        foreach (ElementId id in fam.GetFamilySymbolIds()) newIds.Add(id.Value);
-                }
-                t.Commit();
-            }
-            return newIds;
-        }
-
-        // Todos los tipos que se pueden colocar contra un muro (face-based, hospedados o sueltos).
-        // Vienen marcados los de la última corrida o, la primera vez, los que cumplen isDefault.
-        internal static List<TypeItem> CollectTypes(Document doc, Func<FamilySymbol, bool> isDefault, HashSet<long> lastChecked)
-        {
-            var excluded = new HashSet<long> { (long)BuiltInCategory.OST_Doors, (long)BuiltInCategory.OST_Windows };
-
-            return new FilteredElementCollector(doc)
-                .OfClass(typeof(FamilySymbol))
-                .Cast<FamilySymbol>()
-                .Where(s => s.Category != null && !excluded.Contains(s.Category.Id.Value))
-                .Where(s => KindOf(s) != null)
-                .Select(s => new TypeItem
-                {
-                    Id = s.Id.Value,
-                    Label = $"{s.FamilyName} : {s.Name}",
-                    Kind = $"{s.Category.Name}, {KindOf(s)}",
-                    IsChecked = lastChecked.Count > 0 ? lastChecked.Contains(s.Id.Value) : isDefault(s)
-                })
-                .OrderBy(i => i.Label)
-                .ToList();
-        }
-
-        // Secciones "Artwork_*" del template: cada una es una colección de tipos, ordenados de izquierda a derecha
-        private static List<ArtCollection> CollectCollections(Document doc, List<TypeItem> types)
-        {
-            var placeable = new HashSet<long>(types.Select(t => t.Id));
-            var result = new List<ArtCollection>();
-
-            var sections = new FilteredElementCollector(doc)
-                .OfClass(typeof(ViewSection)).Cast<ViewSection>()
-                .Where(v => !v.IsTemplate && LooksLikeArtwork(v.Name))
-                .OrderBy(v => v.Name);
-
-            foreach (ViewSection view in sections)
-            {
-                XYZ right = view.RightDirection;
-                var ids = new FilteredElementCollector(doc, view.Id)
-                    .OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>()
-                    .Where(fi => placeable.Contains(fi.Symbol.Id.Value))
-                    .Select(fi => new { fi.Symbol.Id, X = PositionAlong(fi, view, right) })
-                    .OrderBy(x => x.X)
-                    .Select(x => x.Id.Value)
-                    .Distinct()
-                    .ToList();
-                if (ids.Count > 0) result.Add(new ArtCollection { Name = view.Name, Ids = ids });
-            }
-            return result;
-        }
-
-        private static double PositionAlong(Element e, View view, XYZ right)
-        {
-            BoundingBoxXYZ bb = e.get_BoundingBox(null);
-            return bb == null ? 0 : ((bb.Min + bb.Max) / 2).DotProduct(right);
-        }
-
-        internal static bool LooksLikeArtwork(string familyName)
-        {
-            string n = familyName.Replace(" ", "").Replace("_", "").ToLowerInvariant();
-            return n.Contains("artwork");
-        }
-
-        internal static string KindOf(FamilySymbol s)
-        {
-            switch (s.Family.FamilyPlacementType)
-            {
-                case FamilyPlacementType.WorkPlaneBased: return "face-based";
-                case FamilyPlacementType.OneLevelBasedHosted: return "wall-hosted";
-                case FamilyPlacementType.OneLevelBased: return "unhosted";
-                default: return null;
-            }
-        }
-
-        internal static void SwallowWarnings(Transaction t)
-        {
-            FailureHandlingOptions fho = t.GetFailureHandlingOptions();
-            fho.SetFailuresPreprocessor(new WarningSwallower());
-            t.SetFailureHandlingOptions(fho);
-        }
-
-        private class WallFilter : ISelectionFilter
-        {
-            public bool AllowElement(Element elem) => elem is Wall;
-            public bool AllowReference(Reference reference, XYZ position) => false;
-        }
-
-        // Ocultar advertencias (p.ej. instancias duplicadas) para no frenar la corrida
-        internal class WarningSwallower : IFailuresPreprocessor
-        {
-            public FailureProcessingResult PreprocessFailures(FailuresAccessor a)
-            {
-                foreach (FailureMessageAccessor f in a.GetFailureMessages())
-                    if (f.GetSeverity() == FailureSeverity.Warning) a.DeleteWarning(f);
-                return FailureProcessingResult.Continue;
-            }
-        }
-    }
-
-    // ─── LÓGICA DE COLOCACIÓN DE ARTWORK ─────────────────────────────────────
-    internal class WallPlacer : WallFaces
-    {
-        private const string Marker = "ArtworkPlacer";   // se escribe en Comments de cada pieza colocada
-
-        private readonly double? _height;              // null = altura por defecto de la familia
-        private readonly HeightAlign _align;
-        private readonly double _gap;
-        private readonly int _maxPerFace;
-        private readonly SideMode _sideMode;
-        private readonly Func<double, string> _fmt;
-        private int _typeIndex;
-
-        public WallPlacer(Document doc, List<FamilySymbol> symbols, double? height, HeightAlign align, double clearance, double gap, int maxPerFace, SideMode sideMode, Func<double, string> fmt)
-            : base(doc, symbols, clearance, Marker)
-        {
-            _height = height;
-            _align = align;
-            _gap = gap;
-            _maxPerFace = Math.Max(1, maxPerFace);
-            _sideMode = sideMode;
-            _fmt = fmt;
-        }
-
-        // Un punto de la vista previa: dónde quedaría la pieza en una cara
-        public class Spot
-        {
-            public int Sign;
-            public XYZ OnFace;          // a la altura RefZ
-            public XYZ Normal;          // hacia afuera de esa cara
-            public XYZ Along;           // dirección del muro
-            public bool Blocked;        // sin tramo libre o ya tiene artwork
-        }
-
-        // Altura aproximada del centro de la pieza: para obstáculos, flechas y el primer punto de colocación
-        private double RefHeight
-        {
-            get
-            {
-                double cm40 = UnitUtils.ConvertToInternalUnits(40, UnitTypeId.Centimeters);
-                if (!_height.HasValue) return UnitUtils.ConvertToInternalUnits(150, UnitTypeId.Centimeters);
-                if (_align == HeightAlign.Bottom) return _height.Value + cm40;
-                if (_align == HeightAlign.Top) return _height.Value - cm40;
-                return _height.Value;
-            }
-        }
-
-        private double Height(FamilySymbol sym) => _height.HasValue ? RefHeight : DefaultElevation(sym);
-
-        // Caras elegidas según el modo del diálogo (+1 exterior, -1 interior)
-        public List<int> InitialSides(Wall wall, out string error)
-        {
-            WallGeom g = Analyze(wall, RefHeight, out error);
-            return g == null ? null : ChooseSides(g).Select(s => s.Sign).ToList();
-        }
-
-        public bool HasBothSides(Wall wall) => Analyze(wall, RefHeight, out _)?.Sides.Count == 2;
-
-        // Un lugar para una pieza: centro sobre el muro y ancho máximo disponible
-        private class Slot { public double Center, MaxWidth; }
-
-        // Para cada cara: dónde iría cada pieza (una flecha por pieza en la vista previa)
-        public List<Spot> Spots(Wall wall)
-        {
-            var spots = new List<Spot>();
-            WallGeom g = Analyze(wall, RefHeight, out _);
-            if (g == null) return spots;
-
-            foreach (Side side in g.Sides.Values)
-            {
-                List<Slot> slots = side.HasExisting ? new List<Slot>() : Slots(wall, g, side);
-                if (slots.Count == 0) slots.Add(new Slot { Center = g.Length / 2, MaxWidth = 0 });
-                foreach (Slot slot in slots)
-                {
-                    XYZ p = _p0 + _d * slot.Center + _n * side.V;
-                    spots.Add(new Spot
-                    {
-                        Sign = side.Sign,
-                        OnFace = new XYZ(p.X, p.Y, g.RefZ),
-                        Normal = _n * side.Sign,
-                        Along = _d,
-                        Blocked = slot.MaxWidth <= 0 || NothingFits(slot.MaxWidth)
-                    });
-                }
-            }
-            return spots;
-        }
-
-        public List<ElementId> PlaceOnWall(Wall wall, List<int> signs, List<string> skipped)
-        {
-            var placed = new List<ElementId>();
-            string label = PlaceArtworkCommand.WallLabel(wall);
-
-            WallGeom g = Analyze(wall, RefHeight, out string error);
-            if (g == null) { skipped.Add($"{label}: {error}"); return placed; }
-
-            foreach (int sign in signs)
-            {
-                if (!g.Sides.TryGetValue(sign, out Side side)) continue;
-                if (side.HasExisting) { skipped.Add($"{label}, {side.Name}: already has artwork"); continue; }
-
-                List<Slot> slots = Slots(wall, g, side);
-                if (slots.Count == 0) { skipped.Add($"{label}, {side.Name}: no free wall segment"); continue; }
-
-                foreach (Slot slot in slots)
-                {
-                    FamilyInstance fi = PlaceAt(wall, g.Level, side, slot.Center, slot.MaxWidth, out string reason);
-                    if (fi == null) skipped.Add($"{label}, {side.Name}: {reason}");
-                    else placed.Add(fi.Id);
-                }
-            }
-            return placed;
-        }
-
-        // Una pieza: centrada en el tramo libre más largo.
-        // Varias: en cada tramo libre (de mayor a menor) caben n = largo / (ancho + separación) piezas,
-        // repartidas parejo; se usa el ancho del tipo más ancho para que cualquier tipo de la rotación quepa.
-        private List<Slot> Slots(Wall wall, WallGeom g, Side side)
-        {
-            var slots = new List<Slot>();
-            List<Tuple<double, double>> segments = FreeSegments(0, g.Length, side.Blocked);
-            if (segments.Count == 0) return slots;
-
-            var longest = segments[0];
-            var single = new Slot { Center = (longest.Item1 + longest.Item2) / 2, MaxWidth = longest.Item2 - longest.Item1 };
-            if (_maxPerFace == 1) return new List<Slot> { single };
-
-            double width = WidestType(wall, g, side, single.Center);
-            if (width <= 0) return new List<Slot> { single };
-
-            int remaining = _maxPerFace;
-            foreach (var seg in segments)
-            {
-                double len = seg.Item2 - seg.Item1;
-                int n = Math.Min(remaining, (int)Math.Floor((len + Eps) / (width + _gap)));
-                if (n < 1 && width <= len + Eps) n = 1;   // cabe una, aunque sin la separación completa
-                if (n < 1) continue;
-
-                double pitch = len / n;
-                for (int i = 0; i < n; i++)
-                    slots.Add(new Slot { Center = seg.Item1 + pitch * (i + 0.5), MaxWidth = n == 1 ? len : pitch - _gap });
-                remaining -= n;
-                if (remaining == 0) break;
-            }
-
-            // Si no cupo nada, dejar el tramo más largo para que el reporte diga por qué
-            if (slots.Count == 0) slots.Add(single);
-            return slots.OrderBy(sl => sl.Center).ToList();
-        }
-
-        // Mide cada tipo una sola vez y devuelve el ancho mayor
-        private double WidestType(Wall wall, WallGeom g, Side side, double center)
-        {
-            foreach (FamilySymbol sym in _symbols)
-                if (!_widths.ContainsKey(sym.Id))
-                    _widths[sym.Id] = Measure(sym, wall, g, side, center, Height(sym));
-            return _symbols.Select(sy => _widths[sy.Id]).DefaultIfEmpty(-1).Max();
-        }
-
-        // Solo es true si ya medimos todos los tipos y ninguno cabe
-        private bool NothingFits(double maxWidth) =>
-            _symbols.All(sy => _widths.TryGetValue(sy.Id, out double w) && (w <= 0 || w > maxWidth + Eps));
-
-        private IEnumerable<Side> ChooseSides(WallGeom g)
-        {
-            switch (_sideMode)
-            {
-                case SideMode.Exterior: return g.Sides.Where(kv => kv.Key > 0).Select(kv => kv.Value);
-                case SideMode.Interior: return g.Sides.Where(kv => kv.Key < 0).Select(kv => kv.Value);
-                case SideMode.Both: return g.Sides.Values;
-            }
-
-            // Auto: la cara que mira hacia un room; si hay rooms en ambos lados, el más grande
-            Side best = RoomSide(g);
-            if (best == null) g.Sides.TryGetValue(-1, out best);   // sin rooms: cara interior
-            if (best == null) best = g.Sides.Values.First();
-            return new[] { best };
-        }
-
-        // Prueba los tipos en orden hasta que uno quepa en maxWidth; luego lo centra con su caja real
-        private FamilyInstance PlaceAt(Wall wall, Level level, Side side, double center, double maxWidth, out string reason)
-        {
-            XYZ faceN = _n * side.Sign;
-            double widest = 0;
-
-            for (int k = 0; k < _symbols.Count; k++)
-            {
-                FamilySymbol sym = _symbols[(_typeIndex + k) % _symbols.Count];
-
-                // Si ya sabemos que no cabe, no hace falta colocarlo para probar
-                if (_widths.TryGetValue(sym.Id, out double known) && known > maxWidth + Eps)
-                {
-                    widest = Math.Max(widest, known);
-                    continue;
-                }
-
-                FamilyInstance fi = Create(sym, wall, level, side, PointOnFace(level, side, center, Height(sym)), faceN);
-                if (fi == null) continue;
-                _doc.Regenerate();
-
-                Box box = PieceBox(fi);
-                if (box == null) { _doc.Delete(fi.Id); continue; }
-
-                double width = box.U1 - box.U0;
-                _widths[sym.Id] = width;
-                if (width > maxWidth + Eps)
-                {
-                    widest = Math.Max(widest, width);
-                    _doc.Delete(fi.Id);
-                    continue;
-                }
-
-                XYZ move = _d * (center - (box.U0 + box.U1) / 2);
-                if (_height.HasValue)
-                    move += XYZ.BasisZ * ArtGeometry.AlignDelta(_align, level.ProjectElevation + _height.Value, box.Z0, box.Z1);
-                if (!move.IsZeroLength())
-                    ElementTransformUtils.MoveElement(_doc, fi.Id, move);
-
-                Mark(fi);
-
-                _typeIndex = (_typeIndex + k + 1) % _symbols.Count;
-                reason = null;
-                return fi;
-            }
-
-            reason = widest > 0
-                ? $"free space ({_fmt(maxWidth)}) is narrower than the artwork ({_fmt(widest)})"
-                : "none of the types could be placed on this face";
-            return null;
-        }
-    }
+	private class WallFilter : ISelectionFilter
+	{
+		public bool AllowElement(Element elem)
+		{
+			return elem is Wall;
+		}
+
+		public bool AllowReference(Reference reference, XYZ position)
+		{
+			return false;
+		}
+	}
+
+	internal class WarningSwallower : IFailuresPreprocessor
+	{
+		public FailureProcessingResult PreprocessFailures(FailuresAccessor a)
+		{
+			foreach (FailureMessageAccessor failureMessage in a.GetFailureMessages())
+			{
+				if (failureMessage.GetSeverity() == FailureSeverity.Warning)
+				{
+					a.DeleteWarning(failureMessage);
+				}
+			}
+			return FailureProcessingResult.Continue;
+		}
+	}
+
+	private const string ToolName = "Place Artwork";
+
+	private static readonly DialogSettings _settings = new DialogSettings();
+
+	internal static DialogSettings Settings => _settings;
+
+	internal static void InitDefaults(Func<double, string> fmt)
+	{
+		if (_settings.HeightDefaults == null)
+		{
+			_settings.HeightDefaults = new string[3]
+			{
+				Cm(150.0),
+				Cm(110.0),
+				Cm(200.0)
+			};
+		}
+		if (_settings.HeightText == null)
+		{
+			_settings.HeightText = _settings.HeightDefaults[0];
+		}
+		if (_settings.ClearText == null)
+		{
+			_settings.ClearText = Cm(30.0);
+		}
+		if (_settings.GapText == null)
+		{
+			_settings.GapText = Cm(60.0);
+		}
+		string Cm(double cm)
+		{
+			return fmt(UnitUtils.ConvertToInternalUnits(cm, UnitTypeId.Centimeters));
+		}
+	}
+
+	public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+	{
+		UIDocument activeUIDocument = commandData.Application.ActiveUIDocument;
+		if (activeUIDocument == null || activeUIDocument.Document.IsFamilyDocument)
+		{
+			TaskDialog.Show("Place Artwork", "Open a project (not a family) to use this tool.");
+			return Result.Cancelled;
+		}
+		Document doc = activeUIDocument.Document;
+		Units units = doc.GetUnits();
+		Func<string, double?> parseLength = (string s) => (!UnitFormatUtils.TryParse(units, SpecTypeId.Length, s, out var value)) ? ((double?)null) : new double?(value);
+		InitDefaults(Fmt);
+		Func<FamilySymbol, bool> isDefault = (FamilySymbol s) => LooksLikeArtwork(s.FamilyName);
+		Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa = (string[] paths) =>
+		{
+			HashSet<long> item = LoadFamilies(doc, paths, "Load artwork families");
+			return Tuple.Create(CollectTypes(doc, isDefault, _settings.LastChecked), item);
+		};
+		TypeThumbnails typeThumbnails = new TypeThumbnails(doc, commandData.Application.Application.VersionNumber);
+		List<Wall> walls = SelectedWalls(activeUIDocument);
+		ArtworkDialog artworkDialog;
+		while (true)
+		{
+			List<TypeItem> list = CollectTypes(doc, isDefault, _settings.LastChecked);
+			List<RoomChoice> rooms = RoomScope.Collect(doc, (double a) => UnitFormatUtils.Format(units, SpecTypeId.Area, a, forEditing: false), _settings.LastRooms);
+			artworkDialog = new ArtworkDialog(walls.Count, rooms, list, CollectCollections(doc, list), _settings, parseLength, loadRfa, typeThumbnails.Get);
+			if (artworkDialog.ShowDialog() != true)
+			{
+				return Result.Cancelled;
+			}
+			if (!artworkDialog.PickWallsRequested)
+			{
+				break;
+			}
+			walls = PickWalls(activeUIDocument, "Select the walls to place artwork on, then click Finish") ?? walls;
+		}
+		FaceRanges ranges = null;
+		int roomCount = 0;
+		if (artworkDialog.UseRooms)
+		{
+			ranges = new FaceRanges();
+			roomCount = artworkDialog.SelectedRoomIds.Count;
+			walls = RoomScope.Walls(doc, artworkDialog.SelectedRoomIds, ranges);
+			if (walls.Count == 0)
+			{
+				TaskDialog.Show("Place Artwork", "The chosen rooms aren't bounded by any straight walls in this model.");
+				return Result.Cancelled;
+			}
+		}
+		List<FamilySymbol> list2 = (from id in artworkDialog.SelectedIds
+			select doc.GetElement(new ElementId(id)) as FamilySymbol into s
+			where s != null
+			select s).ToList();
+		WallPlacer wallPlacer = new WallPlacer(doc, list2, artworkDialog.ArtHeight, artworkDialog.Align, artworkDialog.Clearance, artworkDialog.Gap, artworkDialog.MaxPerFace, _settings.Side, Fmt)
+		{
+			Ranges = ranges
+		};
+		List<ElementId> list3 = new List<ElementId>();
+		List<string> list4 = new List<string>();
+		Dictionary<ElementId, List<int>> choice = new Dictionary<ElementId, List<int>>();
+		foreach (Wall item2 in walls)
+		{
+			List<int> list5 = wallPlacer.InitialSides(item2, out var error);
+			if (list5 == null)
+			{
+				list4.Add(WallLabel(item2) + ": " + error);
+			}
+			else
+			{
+				choice[item2.Id] = (ranges != null) ? ranges.Signs(item2.Id) : list5;
+			}
+		}
+		walls = walls.Where((Wall w) => choice.ContainsKey(w.Id)).ToList();
+		if (walls.Count == 0)
+		{
+			TaskDialog.Show("Place Artwork", "None of the selected walls can be used:\n\n" + string.Join("\n", list4));
+			return Result.Cancelled;
+		}
+		if (_settings.Preview && !new SidePreview(activeUIDocument, wallPlacer, walls, choice, "Place Artwork").Run())
+		{
+			return Result.Cancelled;
+		}
+		using (Transaction transaction = new Transaction(doc, "Place artwork"))
+		{
+			SwallowWarnings(transaction);
+			transaction.Start();
+			foreach (FamilySymbol item3 in list2)
+			{
+				if (!item3.IsActive)
+				{
+					item3.Activate();
+				}
+			}
+			doc.Regenerate();
+			foreach (Wall item4 in walls)
+			{
+				using SubTransaction subTransaction = new SubTransaction(doc);
+				subTransaction.Start();
+				try
+				{
+					list3.AddRange(wallPlacer.PlaceOnWall(item4, choice[item4.Id], list4));
+					subTransaction.Commit();
+				}
+				catch (Exception ex)
+				{
+					subTransaction.RollBack();
+					list4.Add(WallLabel(item4) + ": error – " + ex.Message);
+				}
+			}
+			transaction.Commit();
+		}
+		if (list3.Count > 0)
+		{
+			activeUIDocument.Selection.SetElementIds(list3);
+		}
+		TaskDialog taskDialog = new TaskDialog("Place Artwork");
+		taskDialog.MainInstruction = (roomCount > 0) ? $"Placed {list3.Count} artwork piece(s) in {roomCount} room(s)." : $"Placed {list3.Count} artwork piece(s) on {walls.Count} wall(s).";
+		taskDialog.MainContent = ((list4.Count == 0) ? "The new pieces are selected so you can review them." : $"{list4.Count} wall face(s) were skipped (see details). The new pieces are selected.");
+		taskDialog.ExpandedContent = string.Join("\n", list4);
+		taskDialog.Show();
+		return Result.Succeeded;
+		string Fmt(double ft)
+		{
+			return UnitFormatUtils.Format(units, SpecTypeId.Length, ft, forEditing: false);
+		}
+	}
+
+	internal static string WallLabel(Wall w)
+	{
+		return $"Wall {w.Id.Value} ({w.Name})";
+	}
+
+	internal static List<Wall> GetWalls(UIDocument uidoc, string prompt)
+	{
+		List<Wall> list = SelectedWalls(uidoc);
+		return (list.Count > 0) ? list : PickWalls(uidoc, prompt);
+	}
+
+	internal static List<Wall> SelectedWalls(UIDocument uidoc)
+	{
+		Document doc = uidoc.Document;
+		return (from id in uidoc.Selection.GetElementIds()
+			select doc.GetElement(id)).OfType<Wall>().ToList();
+	}
+
+	internal static List<Wall> PickWalls(UIDocument uidoc, string prompt)
+	{
+		Document doc = uidoc.Document;
+		try
+		{
+			return (from w in (from r in uidoc.Selection.PickObjects(ObjectType.Element, new WallFilter(), prompt)
+					select doc.GetElement(r)).OfType<Wall>()
+				group w by w.Id into g
+				select g.First()).ToList();
+		}
+		catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+		{
+			return null;
+		}
+	}
+
+	internal static HashSet<long> LoadFamilies(Document doc, string[] paths, string transactionName)
+	{
+		HashSet<long> hashSet = new HashSet<long>();
+		using Transaction transaction = new Transaction(doc, transactionName);
+		transaction.Start();
+		foreach (string text in paths)
+		{
+			if (!doc.LoadFamily(text, out var family))
+			{
+				string name = Path.GetFileNameWithoutExtension(text);
+				family = new FilteredElementCollector(doc).OfClass(typeof(Family)).Cast<Family>().FirstOrDefault((Family f) => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+			}
+			if (family == null)
+			{
+				continue;
+			}
+			foreach (ElementId familySymbolId in family.GetFamilySymbolIds())
+			{
+				hashSet.Add(familySymbolId.Value);
+			}
+		}
+		transaction.Commit();
+		return hashSet;
+	}
+
+	internal static List<TypeItem> CollectTypes(Document doc, Func<FamilySymbol, bool> isDefault, HashSet<long> lastChecked)
+	{
+		HashSet<long> excluded = new HashSet<long> { -2000023L, -2000014L };
+		return (from FamilySymbol s in new FilteredElementCollector(doc).OfClass(typeof(FamilySymbol))
+			where s.Category != null && !excluded.Contains(s.Category.Id.Value)
+			where KindOf(s) != null
+			select new TypeItem
+			{
+				Id = s.Id.Value,
+				Label = s.FamilyName + " : " + s.Name,
+				Kind = s.Category.Name + ", " + KindOf(s),
+				IsChecked = ((lastChecked.Count > 0) ? lastChecked.Contains(s.Id.Value) : isDefault(s))
+			} into i
+			orderby i.Label
+			select i).ToList();
+	}
+
+	private static List<ArtCollection> CollectCollections(Document doc, List<TypeItem> types)
+	{
+		HashSet<long> placeable = new HashSet<long>(types.Select((TypeItem t) => t.Id));
+		List<ArtCollection> list = new List<ArtCollection>();
+		foreach (ViewSection view in from ViewSection v in new FilteredElementCollector(doc).OfClass(typeof(ViewSection))
+			where !v.IsTemplate && LooksLikeArtwork(v.Name)
+			orderby v.Name
+			select v)
+		{
+			XYZ right = view.RightDirection;
+			List<long> list2 = (from FamilyInstance fi in new FilteredElementCollector(doc, view.Id).OfClass(typeof(FamilyInstance))
+				where placeable.Contains(fi.Symbol.Id.Value)
+				select new
+				{
+					Id = fi.Symbol.Id,
+					X = PositionAlong(fi, view, right)
+				} into x
+				orderby x.X
+				select x.Id.Value).Distinct().ToList();
+			if (list2.Count > 0)
+			{
+				list.Add(new ArtCollection
+				{
+					Name = view.Name,
+					Ids = list2
+				});
+			}
+		}
+		return list;
+	}
+
+	private static double PositionAlong(Element e, View view, XYZ right)
+	{
+		BoundingBoxXYZ boundingBoxXYZ = e.get_BoundingBox((View)null);
+		if (boundingBoxXYZ != null)
+		{
+			return ((boundingBoxXYZ.Min + boundingBoxXYZ.Max) / 2.0).DotProduct(right);
+		}
+		return 0.0;
+	}
+
+	internal static bool LooksLikeArtwork(string familyName)
+	{
+		return familyName.Replace(" ", "").Replace("_", "").ToLowerInvariant()
+			.Contains("artwork");
+	}
+
+	internal static string KindOf(FamilySymbol s)
+	{
+		return s.Family.FamilyPlacementType switch
+		{
+			FamilyPlacementType.WorkPlaneBased => "face-based", 
+			FamilyPlacementType.OneLevelBasedHosted => "wall-hosted", 
+			FamilyPlacementType.OneLevelBased => "unhosted", 
+			_ => null, 
+		};
+	}
+
+	internal static void SwallowWarnings(Transaction t)
+	{
+		FailureHandlingOptions failureHandlingOptions = t.GetFailureHandlingOptions();
+		failureHandlingOptions.SetFailuresPreprocessor(new WarningSwallower());
+		t.SetFailureHandlingOptions(failureHandlingOptions);
+	}
 }

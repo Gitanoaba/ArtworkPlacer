@@ -1,118 +1,126 @@
-using Autodesk.Revit.Attributes;
-using Autodesk.Revit.DB;
-using Autodesk.Revit.UI;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.UI;
 
-namespace ArtworkPlacer
+namespace ArtworkPlacer;
+
+[Transaction(TransactionMode.Manual)]
+public class AlignHeightsCommand : IExternalCommand
 {
-    // ─── ALINEAR ALTURAS DE ARTWORK YA COLOCADO ──────────────────────────────
-    // Sube o baja cada pieza (sin moverla a lo largo del muro) para que su centro, borde inferior
-    // o superior quede a la misma altura sobre el nivel de su muro.
-    [Transaction(TransactionMode.Manual)]
-    public class AlignHeightsCommand : IExternalCommand
-    {
-        private const string ToolName = "Align Artwork Heights";
-        private const string Marker = "ArtworkPlacer";
+	private const string ToolName = "Align Artwork Heights";
 
-        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
-        {
-            UIDocument uidoc = commandData.Application.ActiveUIDocument;
-            if (uidoc == null || uidoc.Document.IsFamilyDocument)
-            {
-                TaskDialog.Show(ToolName, "Open a project (not a family) to use this tool.");
-                return Result.Cancelled;
-            }
-            Document doc = uidoc.Document;
+	private const string Marker = "ArtworkPlacer";
 
-            // Piezas seleccionadas; si no hay, todo el artwork visible en la vista activa
-            List<FamilyInstance> pieces = uidoc.Selection.GetElementIds()
-                .Select(id => doc.GetElement(id)).OfType<FamilyInstance>().ToList();
-            string source = "selected";
-            if (pieces.Count == 0)
-            {
-                // Las muestras de las secciones Artwork_* son la biblioteca del template: no se tocan
-                HashSet<ElementId> library = LibraryPieces(doc);
-                pieces = new FilteredElementCollector(doc, doc.ActiveView.Id)
-                    .OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>()
-                    .Where(fi => IsArtwork(fi) && !library.Contains(fi.Id))
-                    .ToList();
-                source = "in this view (nothing was selected; the Artwork_* section samples are left alone)";
-            }
-            if (pieces.Count == 0)
-            {
-                TaskDialog.Show(ToolName, "No artwork found. Select the pieces to align, or open a view where they are visible.");
-                return Result.Cancelled;
-            }
+	public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+	{
+		UIDocument activeUIDocument = commandData.Application.ActiveUIDocument;
+		if (activeUIDocument == null || activeUIDocument.Document.IsFamilyDocument)
+		{
+			TaskDialog.Show("Align Artwork Heights", "Open a project (not a family) to use this tool.");
+			return Result.Cancelled;
+		}
+		Document doc = activeUIDocument.Document;
+		List<FamilyInstance> list = (from id in activeUIDocument.Selection.GetElementIds()
+			select doc.GetElement(id)).OfType<FamilyInstance>().ToList();
+		string source = "selected";
+		if (list.Count == 0)
+		{
+			HashSet<ElementId> library = LibraryPieces(doc);
+			list = (from FamilyInstance fi in new FilteredElementCollector(doc, doc.ActiveView.Id).OfClass(typeof(FamilyInstance))
+				where IsArtwork(fi) && !library.Contains(fi.Id)
+				select fi).ToList();
+			source = "in this view (nothing was selected; the Artwork_* section samples are left alone)";
+		}
+		if (list.Count == 0)
+		{
+			TaskDialog.Show("Align Artwork Heights", "No artwork found. Select the pieces to align, or open a view where they are visible.");
+			return Result.Cancelled;
+		}
+		Units units = doc.GetUnits();
+		Func<string, double?> parseLength = (string s) => (!UnitFormatUtils.TryParse(units, SpecTypeId.Length, s, out var value)) ? ((double?)null) : new double?(value);
+		PlaceArtworkCommand.InitDefaults(Fmt);
+		AlignDialog alignDialog = new AlignDialog(list.Count, source, PlaceArtworkCommand.Settings, parseLength);
+		if (alignDialog.ShowDialog() != true)
+		{
+			return Result.Cancelled;
+		}
+		int num = 0;
+		int num2 = 0;
+		List<string> list2 = new List<string>();
+		using (Transaction transaction = new Transaction(doc, "Align artwork heights"))
+		{
+			FailureHandlingOptions failureHandlingOptions = transaction.GetFailureHandlingOptions();
+			failureHandlingOptions.SetFailuresPreprocessor(new PlaceArtworkCommand.WarningSwallower());
+			transaction.SetFailureHandlingOptions(failureHandlingOptions);
+			transaction.Start();
+			foreach (FamilyInstance item in list)
+			{
+				string text = $"{item.Symbol.FamilyName} : {item.Symbol.Name} ({item.Id.Value})";
+				try
+				{
+					Level level = ArtGeometry.ReferenceLevel(doc, item);
+					if (level == null)
+					{
+						list2.Add(text + ": no level");
+						continue;
+					}
+					if (!ArtGeometry.ZRange(item, out var z, out var z2))
+					{
+						list2.Add(text + ": no geometry");
+						continue;
+					}
+					double num3 = ArtGeometry.AlignDelta(alignDialog.Align, level.ProjectElevation + alignDialog.ArtHeight, z, z2);
+					if (Math.Abs(num3) < 0.0001)
+					{
+						num2++;
+						continue;
+					}
+					ElementTransformUtils.MoveElement(doc, item.Id, XYZ.BasisZ * num3);
+					num++;
+				}
+				catch (Exception ex)
+				{
+					list2.Add(text + ": " + ex.Message);
+				}
+			}
+			transaction.Commit();
+		}
+		TaskDialog taskDialog = new TaskDialog("Align Artwork Heights");
+		taskDialog.MainInstruction = $"Moved {num} piece(s); {num2} were already at the right height.";
+		taskDialog.MainContent = ((list2.Count == 0) ? "" : $"{list2.Count} piece(s) could not be aligned (see details).");
+		taskDialog.ExpandedContent = string.Join("\n", list2);
+		taskDialog.Show();
+		return Result.Succeeded;
+		string Fmt(double ft)
+		{
+			return UnitFormatUtils.Format(units, SpecTypeId.Length, ft, forEditing: false);
+		}
+	}
 
-            Units units = doc.GetUnits();
-            Func<string, double?> parse = s => UnitFormatUtils.TryParse(units, SpecTypeId.Length, s, out double v) ? v : (double?)null;
-            string Fmt(double ft) => UnitFormatUtils.Format(units, SpecTypeId.Length, ft, false);
-            PlaceArtworkCommand.InitDefaults(Fmt);
+	private static HashSet<ElementId> LibraryPieces(Document doc)
+	{
+		HashSet<ElementId> hashSet = new HashSet<ElementId>();
+		foreach (ViewSection item in from ViewSection v in new FilteredElementCollector(doc).OfClass(typeof(ViewSection))
+			where !v.IsTemplate && PlaceArtworkCommand.LooksLikeArtwork(v.Name)
+			select v)
+		{
+			foreach (ElementId item2 in new FilteredElementCollector(doc, item.Id).OfClass(typeof(FamilyInstance)).ToElementIds())
+			{
+				hashSet.Add(item2);
+			}
+		}
+		return hashSet;
+	}
 
-            var dlg = new AlignDialog(pieces.Count, source, PlaceArtworkCommand.Settings, parse);
-            if (dlg.ShowDialog() != true) return Result.Cancelled;
-
-            int moved = 0, alreadyOk = 0;
-            var skipped = new List<string>();
-
-            using (var t = new Transaction(doc, "Align artwork heights"))
-            {
-                FailureHandlingOptions fho = t.GetFailureHandlingOptions();
-                fho.SetFailuresPreprocessor(new PlaceArtworkCommand.WarningSwallower());
-                t.SetFailureHandlingOptions(fho);
-                t.Start();
-
-                foreach (FamilyInstance fi in pieces)
-                {
-                    string label = $"{fi.Symbol.FamilyName} : {fi.Symbol.Name} ({fi.Id.Value})";
-                    try
-                    {
-                        Level level = ArtGeometry.ReferenceLevel(doc, fi);
-                        if (level == null) { skipped.Add($"{label}: no level"); continue; }
-                        if (!ArtGeometry.ZRange(fi, out double z0, out double z1)) { skipped.Add($"{label}: no geometry"); continue; }
-
-                        double delta = ArtGeometry.AlignDelta(dlg.Align, level.ProjectElevation + dlg.ArtHeight, z0, z1);
-                        if (Math.Abs(delta) < 1e-4) { alreadyOk++; continue; }
-
-                        ElementTransformUtils.MoveElement(doc, fi.Id, XYZ.BasisZ * delta);
-                        moved++;
-                    }
-                    catch (Exception ex)
-                    {
-                        skipped.Add($"{label}: {ex.Message}");
-                    }
-                }
-
-                t.Commit();
-            }
-
-            var report = new TaskDialog(ToolName)
-            {
-                MainInstruction = $"Moved {moved} piece(s); {alreadyOk} were already at the right height.",
-                MainContent = skipped.Count == 0 ? "" : $"{skipped.Count} piece(s) could not be aligned (see details).",
-                ExpandedContent = string.Join("\n", skipped)
-            };
-            report.Show();
-            return Result.Succeeded;
-        }
-
-        private static HashSet<ElementId> LibraryPieces(Document doc)
-        {
-            var ids = new HashSet<ElementId>();
-            var sections = new FilteredElementCollector(doc)
-                .OfClass(typeof(ViewSection)).Cast<ViewSection>()
-                .Where(v => !v.IsTemplate && PlaceArtworkCommand.LooksLikeArtwork(v.Name));
-            foreach (ViewSection view in sections)
-                foreach (ElementId id in new FilteredElementCollector(doc, view.Id).OfClass(typeof(FamilyInstance)).ToElementIds())
-                    ids.Add(id);
-            return ids;
-        }
-
-        // Artwork = colocado por la herramienta, o de una familia que se llama "artwork"
-        private static bool IsArtwork(FamilyInstance fi) =>
-            fi.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() == Marker ||
-            PlaceArtworkCommand.LooksLikeArtwork(fi.Symbol.FamilyName);
-    }
+	private static bool IsArtwork(FamilyInstance fi)
+	{
+		if (!(((Element)fi).get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() == "ArtworkPlacer"))
+		{
+			return PlaceArtworkCommand.LooksLikeArtwork(fi.Symbol.FamilyName);
+		}
+		return true;
+	}
 }

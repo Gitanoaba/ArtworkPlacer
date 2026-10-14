@@ -1,178 +1,216 @@
-using Autodesk.Revit.DB;
-using Autodesk.Revit.UI;
-using Autodesk.Revit.UI.Selection;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.Exceptions;
+using Autodesk.Revit.UI;
+using Autodesk.Revit.UI.Selection;
 
-namespace ArtworkPlacer
+namespace ArtworkPlacer;
+
+internal class TvPreview
 {
-    // ─── VISTA PREVIA DE TVs ─────────────────────────────────────────────────
-    // Una flecha (y en planta, el tipo de TV) por sala. Clic en otro muro de la sala: la TV pasa ahí.
-    // Clic en el muro o la flecha donde ya está: se quita (o se vuelve a poner).
-    // Todo vive dentro de un TransactionGroup que se deshace al final.
-    internal class TvPreview
-    {
-        private readonly UIDocument _uidoc;
-        private readonly Document _doc;
-        private readonly List<TvTarget> _targets;
-        private readonly string _title;
+	private class PreviewFilter : ISelectionFilter
+	{
+		private readonly TvPreview _p;
 
-        private readonly Dictionary<TvTarget, List<ElementId>> _drawn = new Dictionary<TvTarget, List<ElementId>>();
-        private readonly Dictionary<ElementId, TvTarget> _markToTarget = new Dictionary<ElementId, TvTarget>();
-        private readonly HashSet<ElementId> _wallIds;
-        private View _view;
-        private ArrowPainter _painter;
+		public PreviewFilter(TvPreview p)
+		{
+			_p = p;
+		}
 
-        public TvPreview(UIDocument uidoc, List<TvTarget> targets, string title)
-        {
-            _uidoc = uidoc;
-            _doc = uidoc.Document;
-            _targets = targets;
-            _title = title;
-            _wallIds = new HashSet<ElementId>(targets.SelectMany(t => t.Spots).Select(s => s.Wall.Id));
-        }
+		public bool AllowElement(Element e)
+		{
+			if (!_p._wallIds.Contains(e.Id))
+			{
+				return _p._markToTarget.ContainsKey(e.Id);
+			}
+			return true;
+		}
 
-        // true = colocar, false = cancelar
-        public bool Run()
-        {
-            _view = _doc.ActiveView;
-            if (!(_view is ViewPlan) && !(_view is View3D))
-            {
-                var ask = new TaskDialog(_title)
-                {
-                    MainInstruction = "The arrow preview only works in plan and 3D views.",
-                    MainContent = "Place the TVs anyway, without a preview?",
-                    CommonButtons = TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No
-                };
-                return ask.Show() == TaskDialogResult.Yes;
-            }
+		public bool AllowReference(Reference reference, XYZ position)
+		{
+			return false;
+		}
+	}
 
-            _painter = new ArrowPainter(_doc, _view);
-            using (var tg = new TransactionGroup(_doc, "TV preview"))
-            {
-                tg.Start();
-                try
-                {
-                    Redraw(_targets);
-                    while (true)
-                    {
-                        try
-                        {
-                            Reference r = _uidoc.Selection.PickObject(ObjectType.Element, new PreviewFilter(this),
-                                "Click another wall of a room to move its TV there, or the TV's own wall/arrow to remove it · ESC when done");
-                            TvTarget changed = Click(r);
-                            if (changed != null) Redraw(new[] { changed });
-                        }
-                        catch (Autodesk.Revit.Exceptions.OperationCanceledException)
-                        {
-                            switch (AskConfirm())
-                            {
-                                case TaskDialogResult.CommandLink1: return true;
-                                case TaskDialogResult.CommandLink2: continue;
-                                default: return false;
-                            }
-                        }
-                    }
-                }
-                finally
-                {
-                    tg.RollBack();
-                }
-            }
-        }
+	private readonly UIDocument _uidoc;
 
-        private TaskDialogResult AskConfirm()
-        {
-            int on = _targets.Count(t => t.Chosen != null && t.Chosen.Problem == null);
-            int off = _targets.Count - on;
-            var td = new TaskDialog(_title)
-            {
-                MainInstruction = $"Place {on} TV(s)?",
-                MainContent = off > 0
-                    ? $"{off} room(s)/wall(s) get no TV (gray arrows): no free space, already has one, or switched off."
-                    : "Each arrow points at the wall and spot where a TV will go."
-            };
-            td.AddCommandLink(TaskDialogCommandLinkId.CommandLink1, "Place TVs");
-            td.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "Keep adjusting");
-            td.AddCommandLink(TaskDialogCommandLinkId.CommandLink3, "Cancel");
-            return td.Show();
-        }
+	private readonly Document _doc;
 
-        // Devuelve la sala/muro que cambió, o null
-        private TvTarget Click(Reference r)
-        {
-            if (_markToTarget.TryGetValue(r.ElementId, out TvTarget marked))
-            {
-                marked.Toggle();
-                return marked;
-            }
+	private readonly List<TvTarget> _targets;
 
-            var options = _targets
-                .SelectMany(t => t.Spots.Select((s, i) => new { Target = t, Spot = s, Index = i }))
-                .Where(x => x.Spot.Wall.Id == r.ElementId)
-                .ToList();
-            if (options.Count == 0) return null;
+	private readonly string _title;
 
-            // El lugar de esa cara (y de ese tramo del muro) más cercano al clic
-            var pick = options.FirstOrDefault(x => x.Target.Current != x.Index) ?? options[0];
-            Wall wall = options[0].Spot.Wall;
-            if (r.GlobalPoint != null && wall.Location is LocationCurve lc && lc.Curve is Line line)
-            {
-                XYZ q = r.GlobalPoint - line.GetEndPoint(0);
-                double u = q.DotProduct(line.Direction), v = q.DotProduct(wall.Orientation);
-                pick = options
-                    .OrderBy(x => Math.Abs(v - x.Spot.FaceV) + Math.Max(0, Math.Max(x.Spot.U0 - u, u - x.Spot.U1)))
-                    .First();
-            }
+	private readonly Dictionary<TvTarget, List<ElementId>> _drawn = new Dictionary<TvTarget, List<ElementId>>();
 
-            if (pick.Target.Current == pick.Index) pick.Target.Toggle();
-            else pick.Target.Current = pick.Index;
-            return pick.Target;
-        }
+	private readonly Dictionary<ElementId, TvTarget> _markToTarget = new Dictionary<ElementId, TvTarget>();
 
-        private void Redraw(IEnumerable<TvTarget> targets)
-        {
-            using (var t = new Transaction(_doc, "TV arrows"))
-            {
-                t.Start();
-                foreach (TvTarget target in targets)
-                {
-                    if (_drawn.TryGetValue(target, out var old))
-                    {
-                        foreach (ElementId id in old) _markToTarget.Remove(id);
-                        _doc.Delete(old);
-                    }
+	private readonly HashSet<ElementId> _wallIds;
 
-                    var ids = new List<ElementId>();
-                    TvSpot spot = target.Chosen ?? (target.Spots.Count > 0 ? target.Spots[Math.Min(target.LastOn, target.Spots.Count - 1)] : null);
-                    if (spot?.OnFace != null)
-                    {
-                        bool ok = target.Chosen != null && spot.Problem == null;
-                        ids.AddRange(_painter.Draw(spot.OnFace, spot.Normal, spot.Along, !ok));
+	private View _view;
 
-                        string text = target.Chosen == null ? "no TV"
-                            : spot.HasTv ? "has a TV"
-                            : spot.Problem != null ? "doesn't fit"
-                            : spot.Symbol.Name;
-                        ElementId label = _painter.Label(spot.OnFace, spot.Normal, text);
-                        if (label != null) ids.Add(label);
-                    }
+	private ArrowPainter _painter;
 
-                    _drawn[target] = ids;
-                    foreach (ElementId id in ids) _markToTarget[id] = target;
-                }
-                t.Commit();
-            }
-            _uidoc.RefreshActiveView();
-        }
+	public TvPreview(UIDocument uidoc, List<TvTarget> targets, string title)
+	{
+		_uidoc = uidoc;
+		_doc = uidoc.Document;
+		_targets = targets;
+		_title = title;
+		_wallIds = new HashSet<ElementId>(from s in targets.SelectMany((TvTarget t) => t.Spots)
+			select s.Wall.Id);
+	}
 
-        private class PreviewFilter : ISelectionFilter
-        {
-            private readonly TvPreview _p;
-            public PreviewFilter(TvPreview p) { _p = p; }
-            public bool AllowElement(Element e) => _p._wallIds.Contains(e.Id) || _p._markToTarget.ContainsKey(e.Id);
-            public bool AllowReference(Reference reference, XYZ position) => false;
-        }
-    }
+	public bool Run()
+	{
+		_view = _doc.ActiveView;
+		if (!(_view is ViewPlan) && !(_view is View3D))
+		{
+			return new TaskDialog(_title)
+			{
+				MainInstruction = "The arrow preview only works in plan and 3D views.",
+				MainContent = "Place the TVs anyway, without a preview?",
+				CommonButtons = (TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No)
+			}.Show() == TaskDialogResult.Yes;
+		}
+		_painter = new ArrowPainter(_doc, _view);
+		using TransactionGroup transactionGroup = new TransactionGroup(_doc, "TV preview");
+		transactionGroup.Start();
+		try
+		{
+			Redraw(_targets);
+			while (true)
+			{
+				try
+				{
+					Reference r = _uidoc.Selection.PickObject(ObjectType.Element, new PreviewFilter(this), "Click another wall of a room to move its TV there, or the TV's own wall/arrow to remove it · ESC when done");
+					TvTarget tvTarget = Click(r);
+					if (tvTarget != null)
+					{
+						Redraw(new TvTarget[1] { tvTarget });
+					}
+				}
+				catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+				{
+					switch (AskConfirm())
+					{
+					case TaskDialogResult.CommandLink1:
+						return true;
+					case TaskDialogResult.CommandLink2:
+						break;
+					default:
+						return false;
+					}
+				}
+			}
+		}
+		finally
+		{
+			transactionGroup.RollBack();
+		}
+	}
+
+	private TaskDialogResult AskConfirm()
+	{
+		int num = _targets.Count((TvTarget t) => t.Chosen != null && t.Chosen.Problem == null);
+		int num2 = _targets.Count - num;
+		TaskDialog taskDialog = new TaskDialog(_title);
+		taskDialog.MainInstruction = $"Place {num} TV(s)?";
+		taskDialog.MainContent = ((num2 > 0) ? $"{num2} room(s)/wall(s) get no TV (gray arrows): no free space, already has one, or switched off." : "Each arrow points at the wall and spot where a TV will go.");
+		taskDialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink1, "Place TVs");
+		taskDialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "Keep adjusting");
+		taskDialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink3, "Cancel");
+		return taskDialog.Show();
+	}
+
+	private TvTarget Click(Reference r)
+	{
+		if (_markToTarget.TryGetValue(r.ElementId, out var value))
+		{
+			value.Toggle();
+			return value;
+		}
+		var list = (from x in _targets.SelectMany((TvTarget t) => t.Spots.Select((TvSpot s, int i) => new
+			{
+				Target = t,
+				Spot = s,
+				Index = i
+			}))
+			where x.Spot.Wall.Id == r.ElementId
+			select x).ToList();
+		if (list.Count == 0)
+		{
+			return null;
+		}
+		var anon = list.FirstOrDefault(x => x.Target.Current != x.Index) ?? list[0];
+		Wall wall = list[0].Spot.Wall;
+		if (r.GlobalPoint != null && wall.Location is LocationCurve { Curve: Line curve })
+		{
+			XYZ xYZ = r.GlobalPoint - curve.GetEndPoint(0);
+			double u = xYZ.DotProduct(curve.Direction);
+			double v = xYZ.DotProduct(wall.Orientation);
+			anon = list.OrderBy(x => Math.Abs(v - x.Spot.FaceV) + Math.Max(0.0, Math.Max(x.Spot.U0 - u, u - x.Spot.U1))).First();
+		}
+		if (anon.Target.Current == anon.Index)
+		{
+			anon.Target.Toggle();
+		}
+		else
+		{
+			anon.Target.Current = anon.Index;
+		}
+		return anon.Target;
+	}
+
+	private void Redraw(IEnumerable<TvTarget> targets)
+	{
+		using (Transaction transaction = new Transaction(_doc, "TV arrows"))
+		{
+			transaction.Start();
+			foreach (TvTarget target in targets)
+			{
+				if (_drawn.TryGetValue(target, out var value))
+				{
+					foreach (ElementId item in value)
+					{
+						_markToTarget.Remove(item);
+					}
+					_doc.Delete(value);
+				}
+				List<ElementId> list = new List<ElementId>();
+				TvSpot tvSpot = target.Chosen ?? ((target.Spots.Count > 0) ? target.Spots[Math.Min(target.LastOn, target.Spots.Count - 1)] : null);
+				if (tvSpot?.OnFace != null)
+				{
+					bool flag = target.Chosen != null && tvSpot.Problem == null;
+					list.AddRange(_painter.Draw(tvSpot.OnFace, tvSpot.Normal, tvSpot.Along, !flag));
+					string text;
+					if (target.Chosen == null)
+					{
+						text = "no TV";
+					}
+					else if (tvSpot.HasTv)
+					{
+						text = "has a TV";
+					}
+					else
+					{
+						text = ((tvSpot.Problem != null) ? "doesn't fit" : tvSpot.Symbol.Name);
+					}
+					ElementId elementId = _painter.Label(tvSpot.OnFace, tvSpot.Normal, text);
+					if (elementId != null)
+					{
+						list.Add(elementId);
+					}
+				}
+				_drawn[target] = list;
+				foreach (ElementId item2 in list)
+				{
+					_markToTarget[item2] = target;
+				}
+			}
+			transaction.Commit();
+		}
+		_uidoc.RefreshActiveView();
+	}
 }

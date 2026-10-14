@@ -1,95 +1,102 @@
-using Autodesk.Revit.DB;
 using System.Collections.Generic;
 using System.Linq;
+using Autodesk.Revit.DB;
 
-namespace ArtworkPlacer
+namespace ArtworkPlacer;
+
+internal static class ArtGeometry
 {
-    // ─── GEOMETRÍA VISIBLE DE UNA PIEZA ──────────────────────────────────────
-    // La caja de Revit de una familia incluye líneas, objetos ocultos y cualquier cosa que el
-    // modelador haya dejado (p.ej. referencias de "height from the floor"), así que su centro no es
-    // el centro del cuadro. Aquí solo cuentan los sólidos y mallas visibles.
-    internal static class ArtGeometry
-    {
-        private static readonly Options GeomOptions = new Options
-        {
-            DetailLevel = ViewDetailLevel.Fine,
-            IncludeNonVisibleObjects = false
-        };
+	private static readonly Options GeomOptions = new Options
+	{
+		DetailLevel = ViewDetailLevel.Fine,
+		IncludeNonVisibleObjects = false
+	};
 
-        public static List<XYZ> VisiblePoints(Element e)
-        {
-            var pts = new List<XYZ>();
-            GeometryElement ge = e?.get_Geometry(GeomOptions);
-            if (ge != null) Collect(ge, Transform.Identity, pts);
-            return pts;
-        }
+	public static List<XYZ> VisiblePoints(Element e)
+	{
+		List<XYZ> list = new List<XYZ>();
+		GeometryElement geometryElement = e?.get_Geometry(GeomOptions);
+		if (geometryElement != null)
+		{
+			Collect(geometryElement, Transform.Identity, list);
+		}
+		return list;
+	}
 
-        // Se recorre la geometría del símbolo (alineada con la familia) y se transforma,
-        // así la caja no crece en muros diagonales
-        private static void Collect(GeometryElement ge, Transform t, List<XYZ> pts)
-        {
-            foreach (GeometryObject go in ge)
-            {
-                switch (go)
-                {
-                    case GeometryInstance gi:
-                        Collect(gi.GetSymbolGeometry(), t.Multiply(gi.Transform), pts);
-                        break;
+	private static void Collect(GeometryElement ge, Transform t, List<XYZ> pts)
+	{
+		foreach (GeometryObject item in ge)
+		{
+			if (!(item is GeometryInstance geometryInstance))
+			{
+				if (!(item is Solid solid))
+				{
+					if (!(item is Mesh mesh))
+					{
+						continue;
+					}
+					foreach (XYZ vertex in mesh.Vertices)
+					{
+						pts.Add(t.OfPoint(vertex));
+					}
+				}
+				else if (solid.Faces.Size > 0 && (solid.Volume > 1E-09 || solid.SurfaceArea > 1E-09))
+				{
+					BoundingBoxXYZ boundingBox = solid.GetBoundingBox();
+					for (int i = 0; i < 8; i++)
+					{
+						XYZ point = new XYZ(((i & 1) == 0) ? boundingBox.Min.X : boundingBox.Max.X, ((i & 2) == 0) ? boundingBox.Min.Y : boundingBox.Max.Y, ((i & 4) == 0) ? boundingBox.Min.Z : boundingBox.Max.Z);
+						pts.Add(t.OfPoint(boundingBox.Transform.OfPoint(point)));
+					}
+				}
+			}
+			else
+			{
+				Collect(geometryInstance.GetSymbolGeometry(), t.Multiply(geometryInstance.Transform), pts);
+			}
+		}
+	}
 
-                    case Solid s when s.Faces.Size > 0 && (s.Volume > 1e-9 || s.SurfaceArea > 1e-9):
-                        BoundingBoxXYZ bb = s.GetBoundingBox();
-                        for (int i = 0; i < 8; i++)
-                        {
-                            XYZ c = new XYZ(
-                                (i & 1) == 0 ? bb.Min.X : bb.Max.X,
-                                (i & 2) == 0 ? bb.Min.Y : bb.Max.Y,
-                                (i & 4) == 0 ? bb.Min.Z : bb.Max.Z);
-                            pts.Add(t.OfPoint(bb.Transform.OfPoint(c)));
-                        }
-                        break;
+	public static bool ZRange(Element e, out double z0, out double z1)
+	{
+		List<XYZ> list = VisiblePoints(e);
+		if (list.Count > 0)
+		{
+			z0 = list.Min((XYZ p) => p.Z);
+			z1 = list.Max((XYZ p) => p.Z);
+			return true;
+		}
+		BoundingBoxXYZ boundingBoxXYZ = e?.get_BoundingBox((View)null);
+		z0 = boundingBoxXYZ?.Min.Z ?? 0.0;
+		z1 = boundingBoxXYZ?.Max.Z ?? 0.0;
+		return boundingBoxXYZ != null;
+	}
 
-                    case Mesh m:
-                        foreach (XYZ v in m.Vertices) pts.Add(t.OfPoint(v));
-                        break;
-                }
-            }
-        }
+	public static double AlignDelta(HeightAlign align, double targetZ, double z0, double z1)
+	{
+		return align switch
+		{
+			HeightAlign.Bottom => targetZ - z0, 
+			HeightAlign.Top => targetZ - z1, 
+			_ => targetZ - (z0 + z1) / 2.0, 
+		};
+	}
 
-        // Altura mínima y máxima de lo visible; si no hay sólidos, la caja del elemento
-        public static bool ZRange(Element e, out double z0, out double z1)
-        {
-            List<XYZ> pts = VisiblePoints(e);
-            if (pts.Count > 0)
-            {
-                z0 = pts.Min(p => p.Z);
-                z1 = pts.Max(p => p.Z);
-                return true;
-            }
-
-            BoundingBoxXYZ bb = e?.get_BoundingBox(null);
-            z0 = bb?.Min.Z ?? 0;
-            z1 = bb?.Max.Z ?? 0;
-            return bb != null;
-        }
-
-        // Cuánto subir/bajar la pieza para que su centro, borde inferior o superior quede en targetZ
-        public static double AlignDelta(HeightAlign align, double targetZ, double z0, double z1)
-        {
-            switch (align)
-            {
-                case HeightAlign.Bottom: return targetZ - z0;
-                case HeightAlign.Top: return targetZ - z1;
-                default: return targetZ - (z0 + z1) / 2;
-            }
-        }
-
-        // Nivel desde el que se mide la altura: el del muro host (igual que al colocar), si no el de la pieza
-        public static Level ReferenceLevel(Document doc, FamilyInstance fi)
-        {
-            if (fi.Host is Wall w && doc.GetElement(w.LevelId) is Level wallLevel) return wallLevel;
-            if (doc.GetElement(fi.LevelId) is Level own) return own;
-            ElementId schedule = fi.get_Parameter(BuiltInParameter.INSTANCE_SCHEDULE_ONLY_LEVEL_PARAM)?.AsElementId();
-            return schedule != null ? doc.GetElement(schedule) as Level : null;
-        }
-    }
+	public static Level ReferenceLevel(Document doc, FamilyInstance fi)
+	{
+		if (fi.Host is Wall wall && doc.GetElement(wall.LevelId) is Level result)
+		{
+			return result;
+		}
+		if (doc.GetElement(fi.LevelId) is Level result2)
+		{
+			return result2;
+		}
+		ElementId elementId = ((Element)fi).get_Parameter(BuiltInParameter.INSTANCE_SCHEDULE_ONLY_LEVEL_PARAM)?.AsElementId();
+		if (!(elementId != null))
+		{
+			return null;
+		}
+		return doc.GetElement(elementId) as Level;
+	}
 }
