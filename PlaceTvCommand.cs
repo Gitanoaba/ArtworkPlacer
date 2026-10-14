@@ -1,170 +1,178 @@
-using Autodesk.Revit.Attributes;
-using Autodesk.Revit.DB;
-using Autodesk.Revit.UI;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.UI;
 
-namespace ArtworkPlacer
+namespace ArtworkPlacer;
+
+[Transaction(TransactionMode.Manual)]
+public class PlaceTvCommand : IExternalCommand
 {
-    // ─── COMANDO: TVs EN SALAS DE REUNIÓN ────────────────────────────────────
-    [Transaction(TransactionMode.Manual)]
-    public class PlaceTvCommand : IExternalCommand
-    {
-        private const string ToolName = "Place TV";
+	private const string ToolName = "Place TV";
 
-        // Se recuerdan entre corridas dentro de la misma sesión de Revit
-        private static readonly TvSettings _settings = new TvSettings();
+	private static readonly TvSettings _settings = new TvSettings();
 
-        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
-        {
-            UIDocument uidoc = commandData.Application.ActiveUIDocument;
-            if (uidoc == null || uidoc.Document.IsFamilyDocument)
-            {
-                TaskDialog.Show(ToolName, "Open a project (not a family) to use this tool.");
-                return Result.Cancelled;
-            }
-            Document doc = uidoc.Document;
+	public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+	{
+		UIDocument activeUIDocument = commandData.Application.ActiveUIDocument;
+		if (activeUIDocument == null || activeUIDocument.Document.IsFamilyDocument)
+		{
+			TaskDialog.Show("Place TV", "Open a project (not a family) to use this tool.");
+			return Result.Cancelled;
+		}
+		Document doc = activeUIDocument.Document;
+		List<Wall> walls = PlaceArtworkCommand.GetWalls(activeUIDocument, "Select the walls of the meeting rooms (or one wall per TV), then click Finish");
+		if (walls == null)
+		{
+			return Result.Cancelled;
+		}
+		if (walls.Count == 0)
+		{
+			TaskDialog.Show("Place TV", "No walls were selected.");
+			return Result.Cancelled;
+		}
+		Units units = doc.GetUnits();
+		Func<string, double?> parseLength = (string s) => (!UnitFormatUtils.TryParse(units, SpecTypeId.Length, s, out var value)) ? ((double?)null) : new double?(value);
+		if (_settings.BottomText == null)
+		{
+			_settings.BottomText = Fmt(UnitUtils.ConvertToInternalUnits(100.0, UnitTypeId.Centimeters));
+		}
+		if (_settings.ClearText == null)
+		{
+			_settings.ClearText = Fmt(UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters));
+		}
+		Func<FamilySymbol, bool> isDefault = (FamilySymbol s) => LooksLikeTv(s.FamilyName);
+		Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa = (string[] paths) =>
+		{
+			HashSet<long> item = PlaceArtworkCommand.LoadFamilies(doc, paths, "Load TV families");
+			return Tuple.Create(PlaceArtworkCommand.CollectTypes(doc, isDefault, _settings.LastChecked), item);
+		};
+		TvDialog tvDialog = new TvDialog(walls.Count, PlaceArtworkCommand.CollectTypes(doc, isDefault, _settings.LastChecked), _settings, parseLength, loadRfa);
+		if (tvDialog.ShowDialog() != true)
+		{
+			return Result.Cancelled;
+		}
+		List<FamilySymbol> list = (from id in tvDialog.SelectedIds
+			select doc.GetElement(new ElementId(id)) as FamilySymbol into s
+			where s != null
+			select s).ToList();
+		TvPlacer placer = new TvPlacer(doc, list, tvDialog.Clearance, tvDialog.BottomHeight, _settings.AutoSize, tvDialog.DepthFactor, Fmt);
+		List<string> list2 = new List<string>();
+		using (Transaction transaction = new Transaction(doc, "Measure TV types"))
+		{
+			PlaceArtworkCommand.SwallowWarnings(transaction);
+			transaction.Start();
+			foreach (FamilySymbol item2 in list)
+			{
+				if (!item2.IsActive)
+				{
+					item2.Activate();
+				}
+			}
+			doc.Regenerate();
+			placer.MeasureTypes(walls);
+			transaction.RollBack();
+		}
+		List<FamilySymbol> unmeasured = placer.Unmeasured;
+		if (unmeasured.Count == list.Count)
+		{
+			TaskDialog.Show("Place TV", "None of the checked TV types could be placed on the selected walls.");
+			return Result.Cancelled;
+		}
+		foreach (FamilySymbol item3 in unmeasured)
+		{
+			list2.Add(item3.FamilyName + " : " + item3.Name + ": could not be placed on these walls, not used");
+		}
+		List<FoundRoom> list3 = RoomFinder.Find(walls, out var loose);
+		List<Outline> doors = DoorBoxes(doc);
+		List<TvTarget> list4 = list3.OrderByDescending((FoundRoom r) => r.Area).Select((FoundRoom r, int i) => placer.RoomTarget(r, i + 1, doors)).Concat(loose.Select(placer.WallTarget))
+			.ToList();
+		if (list4.All((TvTarget t) => t.Chosen == null))
+		{
+			TaskDialog.Show("Place TV", "No TV can be placed on the selected walls:\n\n" + string.Join("\n", list4.Select((TvTarget t) => t.Label + ": " + t.Note)));
+			return Result.Cancelled;
+		}
+		if (_settings.Preview && !new TvPreview(activeUIDocument, list4, "Place TV").Run())
+		{
+			return Result.Cancelled;
+		}
+		List<ElementId> list5 = new List<ElementId>();
+		using (Transaction transaction2 = new Transaction(doc, "Place TVs"))
+		{
+			PlaceArtworkCommand.SwallowWarnings(transaction2);
+			transaction2.Start();
+			foreach (FamilySymbol item4 in list)
+			{
+				if (!item4.IsActive)
+				{
+					item4.Activate();
+				}
+			}
+			doc.Regenerate();
+			foreach (TvTarget item5 in list4)
+			{
+				TvSpot chosen = item5.Chosen;
+				if (chosen == null)
+				{
+					list2.Add(item5.Label + ": " + (item5.Note ?? "no TV"));
+					continue;
+				}
+				using SubTransaction subTransaction = new SubTransaction(doc);
+				subTransaction.Start();
+				try
+				{
+					FamilyInstance familyInstance = placer.Place(chosen, out var reason);
+					if (familyInstance == null)
+					{
+						list2.Add(item5.Label + ": " + reason);
+					}
+					else
+					{
+						list5.Add(familyInstance.Id);
+					}
+					subTransaction.Commit();
+				}
+				catch (Exception ex)
+				{
+					subTransaction.RollBack();
+					list2.Add(item5.Label + ": error – " + ex.Message);
+				}
+			}
+			transaction2.Commit();
+		}
+		if (list5.Count > 0)
+		{
+			activeUIDocument.Selection.SetElementIds(list5);
+		}
+		TaskDialog taskDialog = new TaskDialog("Place TV");
+		taskDialog.MainInstruction = $"Placed {list5.Count} TV(s): {list3.Count} room(s) found, {loose.Count} single wall(s).";
+		taskDialog.MainContent = ((list2.Count == 0) ? "The new TVs are selected so you can review them." : $"{list2.Count} item(s) skipped (see details). The new TVs are selected.");
+		taskDialog.ExpandedContent = string.Join("\n", list2);
+		taskDialog.Show();
+		return Result.Succeeded;
+		string Fmt(double ft)
+		{
+			return UnitFormatUtils.Format(units, SpecTypeId.Length, ft, forEditing: false);
+		}
+	}
 
-            List<Wall> walls = PlaceArtworkCommand.GetWalls(uidoc,
-                "Select the walls of the meeting rooms (or one wall per TV), then click Finish");
-            if (walls == null) return Result.Cancelled;
-            if (walls.Count == 0)
-            {
-                TaskDialog.Show(ToolName, "No walls were selected.");
-                return Result.Cancelled;
-            }
+	internal static bool LooksLikeTv(string familyName)
+	{
+		string text = familyName.ToLowerInvariant();
+		if (!text.Contains("tv"))
+		{
+			return text.Contains("television");
+		}
+		return true;
+	}
 
-            // Longitudes en las unidades del proyecto (cm, m, pies…)
-            Units units = doc.GetUnits();
-            Func<string, double?> parse = s => UnitFormatUtils.TryParse(units, SpecTypeId.Length, s, out double v) ? v : (double?)null;
-            string Fmt(double ft) => UnitFormatUtils.Format(units, SpecTypeId.Length, ft, false);
-            if (_settings.BottomText == null) _settings.BottomText = Fmt(UnitUtils.ConvertToInternalUnits(100, UnitTypeId.Centimeters));
-            if (_settings.ClearText == null) _settings.ClearText = Fmt(UnitUtils.ConvertToInternalUnits(30, UnitTypeId.Centimeters));
-
-            Func<FamilySymbol, bool> isDefault = s => LooksLikeTv(s.FamilyName);
-            Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa = paths =>
-            {
-                HashSet<long> newIds = PlaceArtworkCommand.LoadFamilies(doc, paths, "Load TV families");
-                return Tuple.Create(PlaceArtworkCommand.CollectTypes(doc, isDefault, _settings.LastChecked), newIds);
-            };
-
-            var dlg = new TvDialog(walls.Count, PlaceArtworkCommand.CollectTypes(doc, isDefault, _settings.LastChecked), _settings, parse, loadRfa);
-            if (dlg.ShowDialog() != true) return Result.Cancelled;
-
-            List<FamilySymbol> symbols = dlg.SelectedIds
-                .Select(id => doc.GetElement(new ElementId(id)) as FamilySymbol)
-                .Where(s => s != null)
-                .ToList();
-
-            var placer = new TvPlacer(doc, symbols, dlg.Clearance, dlg.BottomHeight, _settings.AutoSize, dlg.DepthFactor, Fmt);
-            var skipped = new List<string>();
-
-            // Medir el ancho real de cada TV: se colocan y se borran en una transacción que se deshace
-            using (var t = new Transaction(doc, "Measure TV types"))
-            {
-                PlaceArtworkCommand.SwallowWarnings(t);
-                t.Start();
-                foreach (FamilySymbol s in symbols)
-                    if (!s.IsActive) s.Activate();
-                doc.Regenerate();
-                placer.MeasureTypes(walls);
-                t.RollBack();
-            }
-            List<FamilySymbol> unmeasured = placer.Unmeasured;
-            if (unmeasured.Count == symbols.Count)
-            {
-                TaskDialog.Show(ToolName, "None of the checked TV types could be placed on the selected walls.");
-                return Result.Cancelled;
-            }
-            foreach (FamilySymbol s in unmeasured)
-                skipped.Add($"{s.FamilyName} : {s.Name}: could not be placed on these walls, not used");
-
-            // Salas cerradas por los muros seleccionados; los muros que no cierran nada van uno por uno
-            List<FoundRoom> rooms = RoomFinder.Find(walls, out List<Wall> loose);
-            List<Outline> doors = DoorBoxes(doc);
-            List<TvTarget> targets = rooms
-                .OrderByDescending(r => r.Area)
-                .Select((r, i) => placer.RoomTarget(r, i + 1, doors))
-                .Concat(loose.Select(placer.WallTarget))
-                .ToList();
-
-            if (targets.All(t => t.Chosen == null))
-            {
-                TaskDialog.Show(ToolName, "No TV can be placed on the selected walls:\n\n" +
-                    string.Join("\n", targets.Select(t => $"{t.Label}: {t.Note}")));
-                return Result.Cancelled;
-            }
-
-            if (_settings.Preview && !new TvPreview(uidoc, targets, ToolName).Run())
-                return Result.Cancelled;
-
-            var placedIds = new List<ElementId>();
-            using (var t = new Transaction(doc, "Place TVs"))
-            {
-                PlaceArtworkCommand.SwallowWarnings(t);
-                t.Start();
-
-                foreach (FamilySymbol s in symbols)
-                    if (!s.IsActive) s.Activate();
-                doc.Regenerate();
-
-                foreach (TvTarget target in targets)
-                {
-                    TvSpot spot = target.Chosen;
-                    if (spot == null) { skipped.Add($"{target.Label}: {target.Note ?? "no TV"}"); continue; }
-
-                    using (var st = new SubTransaction(doc))
-                    {
-                        st.Start();
-                        try
-                        {
-                            FamilyInstance fi = placer.Place(spot, out string reason);
-                            if (fi == null) skipped.Add($"{target.Label}: {reason}");
-                            else placedIds.Add(fi.Id);
-                            st.Commit();
-                        }
-                        catch (Exception ex)
-                        {
-                            st.RollBack();
-                            skipped.Add($"{target.Label}: error – {ex.Message}");
-                        }
-                    }
-                }
-
-                t.Commit();
-            }
-
-            if (placedIds.Count > 0)
-                uidoc.Selection.SetElementIds(placedIds);
-
-            var report = new TaskDialog(ToolName)
-            {
-                MainInstruction = $"Placed {placedIds.Count} TV(s): {rooms.Count} room(s) found, {loose.Count} single wall(s).",
-                MainContent = skipped.Count == 0
-                    ? "The new TVs are selected so you can review them."
-                    : $"{skipped.Count} item(s) skipped (see details). The new TVs are selected.",
-                ExpandedContent = string.Join("\n", skipped)
-            };
-            report.Show();
-
-            return Result.Succeeded;
-        }
-
-        private static bool LooksLikeTv(string familyName)
-        {
-            string n = familyName.ToLowerInvariant();
-            return n.Contains("tv") || n.Contains("television");
-        }
-
-        // Cajas de todas las puertas (también las de muros cortina), para saber dónde está la entrada de cada sala
-        private static List<Outline> DoorBoxes(Document doc) =>
-            new FilteredElementCollector(doc)
-                .OfCategory(BuiltInCategory.OST_Doors)
-                .WhereElementIsNotElementType()
-                .Select(e => e.get_BoundingBox(null))
-                .Where(bb => bb != null)
-                .Select(bb => new Outline(bb.Min, bb.Max))
-                .ToList();
-    }
+	internal static List<Outline> DoorBoxes(Document doc)
+	{
+		return (from e in new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Doors).WhereElementIsNotElementType()
+			select e.get_BoundingBox((View)null) into bb
+			where bb != null
+			select new Outline(bb.Min, bb.Max)).ToList();
+	}
 }

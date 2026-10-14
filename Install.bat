@@ -24,18 +24,18 @@ if not exist "%SRC%ArtworkPlacer.dll" (
 
 if not exist "%DEST%" mkdir "%DEST%"
 
-for %%F in (ArtworkPlacer.dll ArtworkPlacer.addin ArtworkPlacer.png AlignHeights.png TvPlacer.png) do (
+for %%F in (ArtworkPlacer.dll ArtworkPlacer.addin ArtworkPlacer.png AlignHeights.png TvPlacer.png RoomStudio.png) do (
   if exist "%SRC%%%F" (
     copy /Y "%SRC%%%F" "%DEST%\" >nul || goto :failed
   )
 )
 
 rem Windows marca como bloqueados los archivos que vienen de internet o de un zip
-powershell -NoProfile -ExecutionPolicy Bypass -Command "foreach ($f in 'ArtworkPlacer.dll','ArtworkPlacer.addin','ArtworkPlacer.png','AlignHeights.png','TvPlacer.png') { $p = Join-Path $env:DEST $f; if (Test-Path -LiteralPath $p) { Unblock-File -LiteralPath $p } }" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "foreach ($f in 'ArtworkPlacer.dll','ArtworkPlacer.addin','ArtworkPlacer.png','AlignHeights.png','TvPlacer.png','RoomStudio.png') { $p = Join-Path $env:DEST $f; if (Test-Path -LiteralPath $p) { Unblock-File -LiteralPath $p } }" >nul 2>&1
 
 echo Qbiq Tools installed.
 echo.
-echo Open Revit 2024: you'll find Place Artwork, Align Heights and Place TV
+echo Open Revit 2024: you'll find Room Studio, Place Artwork, Align Heights and Place TV
 echo in the "Qbiq Tools" tab.
 echo.
 pause

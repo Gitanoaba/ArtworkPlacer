@@ -1,262 +1,392 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using Microsoft.Win32;
 
-namespace ArtworkPlacer
+namespace ArtworkPlacer;
+
+public class TvDialog : Window
 {
-    // Opciones del diálogo de TVs; se recuerdan entre corridas dentro de la sesión de Revit
-    public class TvSettings
-    {
-        public string Filter = "tv";
-        public bool AutoSize = true;
-        public string FactorText = "4.5";
-        public bool UseBottom = true;
-        public string BottomText;
-        public string ClearText;
-        public bool Preview = true;
-        public HashSet<long> LastChecked = new HashSet<long>();
-    }
+	private const string Title_ = "Place TV";
 
-    // ─── VENTANA WPF ─────────────────────────────────────────────────────────
-    public class TvDialog : Window
-    {
-        private const string Title_ = "Place TV";
+	private List<TypeItem> _items;
 
-        // Resultados (longitudes en pies internos)
-        public List<long> SelectedIds => _items.Where(i => i.IsChecked).Select(i => i.Id).ToList();
-        public double? BottomHeight { get; private set; }   // null = respetar la altura de la familia
-        public double Clearance { get; private set; }
-        public double DepthFactor { get; private set; }
+	private readonly TvSettings _settings;
 
-        private List<TypeItem> _items;
-        private readonly TvSettings _settings;
-        private readonly Func<string, double?> _parseLength;
-        private readonly Func<string[], Tuple<List<TypeItem>, HashSet<long>>> _loadRfa;
+	private readonly Func<string, double?> _parseLength;
 
-        private readonly TextBox _search;
-        private readonly ListBox _list;
-        private readonly Label _countLabel;
-        private readonly ComboBox _sizeBox;
-        private readonly TextBox _factorBox;
-        private readonly CheckBox _useBottom;
-        private readonly TextBox _bottomBox;
-        private readonly TextBox _clearBox;
-        private readonly CheckBox _previewBox;
+	private readonly Func<string[], Tuple<List<TypeItem>, HashSet<long>>> _loadRfa;
 
-        public TvDialog(
-            int wallCount,
-            List<TypeItem> items,
-            TvSettings settings,
-            Func<string, double?> parseLength,
-            Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa)
-        {
-            _items = items;
-            _settings = settings;
-            _parseLength = parseLength;
-            _loadRfa = loadRfa;
+	private readonly TextBox _search;
 
-            Title = Title_;
-            Width = 540;
-            SizeToContent = SizeToContent.Height;
-            WindowStartupLocation = WindowStartupLocation.CenterScreen;
-            ResizeMode = ResizeMode.NoResize;
+	private readonly ListBox _list;
 
-            var root = new StackPanel { Margin = new Thickness(16) };
+	private readonly Label _countLabel;
 
-            root.Children.Add(new TextBlock
-            {
-                Text = $"{wallCount} wall(s) selected. Closed rooms formed by these walls get one TV each; " +
-                       "walls that don't close a room get one TV per wall.",
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 8)
-            });
-            root.Children.Add(new Label { Content = "TV types to choose from:", FontWeight = FontWeights.SemiBold, Padding = new Thickness(0, 0, 0, 4) });
+	private readonly ComboBox _sizeBox;
 
-            // Buscador + cargar .rfa
-            var searchRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
-            var btnLoad = new Button { Content = "Load .rfa…", Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(6, 0, 0, 0) };
-            DockPanel.SetDock(btnLoad, Dock.Right);
-            searchRow.Children.Add(btnLoad);
-            searchRow.Children.Add(new Label { Content = "Search:", Width = 70, Padding = new Thickness(0, 4, 6, 0) });
-            _search = new TextBox { Text = settings.Filter, Padding = new Thickness(4) };
-            searchRow.Children.Add(_search);
-            root.Children.Add(searchRow);
+	private readonly TextBox _factorBox;
 
-            _list = new ListBox { Height = 180 };
-            root.Children.Add(_list);
+	private readonly CheckBox _useBottom;
 
-            var listButtons = new DockPanel { Margin = new Thickness(0, 4, 0, 8) };
-            var btnAll = new Button { Content = "Check visible", Padding = new Thickness(8, 2, 8, 2) };
-            var btnNone = new Button { Content = "Uncheck all", Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(6, 0, 0, 0) };
-            _countLabel = new Label { Foreground = System.Windows.Media.Brushes.Gray, HorizontalAlignment = HorizontalAlignment.Right };
-            listButtons.Children.Add(btnAll);
-            listButtons.Children.Add(btnNone);
-            listButtons.Children.Add(_countLabel);
-            root.Children.Add(listButtons);
+	private readonly TextBox _bottomBox;
 
-            // Parámetros
-            var grid = new Grid();
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(230) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition());
-            for (int i = 0; i < 5; i++) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+	private readonly TextBox _clearBox;
 
-            _sizeBox = new ComboBox { Margin = new Thickness(0, 3, 0, 3) };
-            _sizeBox.Items.Add("Auto: bigger rooms get bigger TVs");
-            _sizeBox.Items.Add("Always the largest that fits");
-            _sizeBox.SelectedIndex = settings.AutoSize ? 0 : 1;
-            AddRow(grid, 0, NewLabel("TV size:"), _sizeBox);
+	private readonly CheckBox _previewBox;
 
-            _factorBox = NewBox(settings.FactorText);
-            _factorBox.ToolTip = "A TV is used for rooms up to (its width × this number) deep.\n" +
-                                 "4.5 ≈ a 55\" TV (1.24 m wide) for rooms up to ~5.6 m deep.";
-            _factorBox.IsEnabled = settings.AutoSize;
-            _sizeBox.SelectionChanged += (s, e) => _factorBox.IsEnabled = _sizeBox.SelectedIndex == 0;
-            AddRow(grid, 1, NewLabel("    Max. room depth = TV width ×"), _factorBox);
+	public List<long> SelectedIds => (from i in _items
+		where i.IsChecked
+		select i.Id).ToList();
 
-            _useBottom = new CheckBox { Content = "TV bottom edge height (from level):", IsChecked = settings.UseBottom, VerticalAlignment = VerticalAlignment.Center };
-            _bottomBox = NewBox(settings.BottomText);
-            _bottomBox.IsEnabled = settings.UseBottom;
-            _useBottom.Checked += (s, e) => _bottomBox.IsEnabled = true;
-            _useBottom.Unchecked += (s, e) => _bottomBox.IsEnabled = false;
-            AddRow(grid, 2, _useBottom, _bottomBox);
+	public double? BottomHeight { get; private set; }
 
-            _clearBox = NewBox(settings.ClearText);
-            AddRow(grid, 3, NewLabel("Min. clearance to doors/corners:"), _clearBox);
+	public double Clearance { get; private set; }
 
-            _previewBox = new CheckBox
-            {
-                Content = "Preview with arrows before placing (click a wall to move the TV)",
-                IsChecked = settings.Preview,
-                Margin = new Thickness(0, 8, 0, 0)
-            };
-            Grid.SetRow(_previewBox, 4); Grid.SetColumnSpan(_previewBox, 2);
-            grid.Children.Add(_previewBox);
-            root.Children.Add(grid);
+	public double DepthFactor { get; private set; }
 
-            var btnPlace = new Button
-            {
-                Content = "Place TVs",
-                Margin = new Thickness(0, 14, 0, 0),
-                Padding = new Thickness(14, 5, 14, 5),
-                HorizontalAlignment = HorizontalAlignment.Right,
-                IsDefault = true
-            };
-            root.Children.Add(btnPlace);
+	public TvDialog(int wallCount, List<TypeItem> items, TvSettings settings, Func<string, double?> parseLength, Func<string[], Tuple<List<TypeItem>, HashSet<long>>> loadRfa)
+	{
+		_items = items;
+		_settings = settings;
+		_parseLength = parseLength;
+		_loadRfa = loadRfa;
+		Title = "Place TV";
+		Width = 580.0;
+		SizeToContent = SizeToContent.Height;
+		WindowStartupLocation = WindowStartupLocation.CenterScreen;
+		ResizeMode = ResizeMode.NoResize;
+		Theme.Apply(this);
+		StackPanel stackPanel = new StackPanel
+		{
+			Margin = new Thickness(24.0, 18.0, 24.0, 20.0)
+		};
+		TextBlock types = Theme.Heading("TV types");
+		types.Margin = new Thickness(0.0, 0.0, 0.0, 10.0);
+		stackPanel.Children.Add(types);
+		DockPanel dockPanel = new DockPanel
+		{
+			Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
+		};
+		Button button = new Button
+		{
+			Content = "Load family…",
+			Margin = new Thickness(8.0, 0.0, 0.0, 0.0)
+		};
+		DockPanel.SetDock(button, Dock.Right);
+		dockPanel.Children.Add(button);
+		_search = new TextBox
+		{
+			Text = settings.Filter,
+		};
+		dockPanel.Children.Add(Theme.WithPlaceholder(_search, "Search TV types"));
+		stackPanel.Children.Add(dockPanel);
+		_list = new ListBox
+		{
+			Height = 180.0
+		};
+		stackPanel.Children.Add(_list);
+		DockPanel dockPanel2 = new DockPanel
+		{
+			Margin = new Thickness(-6.0, 6.0, 0.0, 14.0)
+		};
+		Button button2 = new Button
+		{
+			Content = "Select all shown",
+			Style = Theme.Get("Link")
+		};
+		Button button3 = new Button
+		{
+			Content = "Clear",
+			Style = Theme.Get("Link")
+		};
+		_countLabel = new Label
+		{
+			Foreground = Theme.Muted,
+			VerticalAlignment = VerticalAlignment.Center,
+			HorizontalAlignment = HorizontalAlignment.Right
+		};
+		dockPanel2.Children.Add(button2);
+		dockPanel2.Children.Add(button3);
+		dockPanel2.Children.Add(_countLabel);
+		stackPanel.Children.Add(dockPanel2);
+		Grid grid = new Grid
+		{
+			ColumnDefinitions = 
+			{
+				new ColumnDefinition
+				{
+					Width = new GridLength(260.0)
+				},
+				new ColumnDefinition()
+			}
+		};
+		for (int i = 0; i < 5; i++)
+		{
+			grid.RowDefinitions.Add(new RowDefinition
+			{
+				Height = GridLength.Auto
+			});
+		}
+		_sizeBox = new ComboBox
+		{
+			Margin = new Thickness(0.0, 3.0, 0.0, 3.0)
+		};
+		_sizeBox.Items.Add("Auto: bigger rooms get bigger TVs");
+		_sizeBox.Items.Add("Always the largest that fits");
+		_sizeBox.SelectedIndex = ((!settings.AutoSize) ? 1 : 0);
+		AddRow(grid, 0, NewLabel("TV size:"), _sizeBox);
+		_factorBox = NewBox(settings.FactorText);
+		_factorBox.ToolTip = "A TV is used for rooms up to (its width × this number) deep.\n4.5 ≈ a 55\" TV (1.24 m wide) for rooms up to ~5.6 m deep.";
+		_factorBox.IsEnabled = settings.AutoSize;
+		_sizeBox.SelectionChanged += (object s, SelectionChangedEventArgs e) =>
+		{
+			_factorBox.IsEnabled = _sizeBox.SelectedIndex == 0;
+		};
+		AddRow(grid, 1, NewLabel("    Max. room depth = TV width ×"), _factorBox);
+		_useBottom = new CheckBox
+		{
+			Content = "TV bottom edge height (from level):",
+			IsChecked = settings.UseBottom,
+			VerticalAlignment = VerticalAlignment.Center
+		};
+		_bottomBox = NewBox(settings.BottomText);
+		_bottomBox.IsEnabled = settings.UseBottom;
+		_useBottom.Checked += (object s, RoutedEventArgs e) =>
+		{
+			_bottomBox.IsEnabled = true;
+		};
+		_useBottom.Unchecked += (object s, RoutedEventArgs e) =>
+		{
+			_bottomBox.IsEnabled = false;
+		};
+		AddRow(grid, 2, _useBottom, _bottomBox);
+		_clearBox = NewBox(settings.ClearText);
+		AddRow(grid, 3, NewLabel("Min. clearance to doors/corners:"), _clearBox);
+		_previewBox = new CheckBox
+		{
+			Content = "Preview with arrows before placing (click a wall to move the TV)",
+			IsChecked = settings.Preview,
+			Margin = new Thickness(0.0, 8.0, 0.0, 0.0)
+		};
+		Grid.SetRow(_previewBox, 4);
+		Grid.SetColumnSpan(_previewBox, 2);
+		grid.Children.Add(_previewBox);
+		stackPanel.Children.Add(grid);
+		Button button4 = new Button
+		{
+			Content = "Place TVs",
+			Padding = new Thickness(18.0, 8.0, 18.0, 8.0),
+			IsDefault = true
+		};
+		Button cancel = new Button
+		{
+			Content = "Cancel",
+			Padding = new Thickness(16.0, 8.0, 16.0, 8.0),
+			IsCancel = true
+		};
+		DockPanel root = new DockPanel();
+		Border header = Theme.Header("Place TVs", $"{wallCount} wall(s) selected. Each closed room formed by these walls gets one TV; walls that don't close a room get one TV each.");
+		DockPanel.SetDock(header, Dock.Top);
+		root.Children.Add(header);
+		Border footer = Theme.Footer(null, cancel, button4);
+		DockPanel.SetDock(footer, Dock.Bottom);
+		root.Children.Add(footer);
+		root.Children.Add(stackPanel);
+		Content = root;
+		_search.TextChanged += (object s, TextChangedEventArgs e) =>
+		{
+			RefreshList();
+		};
+		button2.Click += (object s, RoutedEventArgs e) =>
+		{
+			foreach (TypeItem item in _items.Where(Visible))
+			{
+				item.IsChecked = true;
+			}
+			RefreshList();
+		};
+		button3.Click += (object s, RoutedEventArgs e) =>
+		{
+			foreach (TypeItem item2 in _items)
+			{
+				item2.IsChecked = false;
+			}
+			RefreshList();
+		};
+		button.Click += (object s, RoutedEventArgs e) =>
+		{
+			LoadFamilies();
+		};
+		button4.Click += (object s, RoutedEventArgs e) =>
+		{
+			Accept();
+		};
+		RefreshList();
+	}
 
-            Content = root;
+	private static TextBox NewBox(string text)
+	{
+		return new TextBox
+		{
+			Text = text,
+			Margin = new Thickness(0.0, 3.0, 0.0, 3.0),
+		};
+	}
 
-            _search.TextChanged += (s, e) => RefreshList();
-            btnAll.Click += (s, e) => { foreach (var it in _items.Where(Visible)) it.IsChecked = true; RefreshList(); };
-            btnNone.Click += (s, e) => { foreach (var it in _items) it.IsChecked = false; RefreshList(); };
-            btnLoad.Click += (s, e) => LoadFamilies();
-            btnPlace.Click += (s, e) => Accept();
+	private static Label NewLabel(string text)
+	{
+		return new Label
+		{
+			Content = text,
+			VerticalAlignment = VerticalAlignment.Center,
+			Padding = new Thickness(0.0)
+		};
+	}
 
-            RefreshList();
-        }
+	private static void AddRow(Grid grid, int row, UIElement left, UIElement right)
+	{
+		Grid.SetRow(left, row);
+		Grid.SetColumn(left, 0);
+		Grid.SetRow(right, row);
+		Grid.SetColumn(right, 1);
+		grid.Children.Add(left);
+		grid.Children.Add(right);
+	}
 
-        private static TextBox NewBox(string text) => new TextBox { Text = text, Margin = new Thickness(0, 3, 0, 3), Padding = new Thickness(4) };
+	private bool Visible(TypeItem it)
+	{
+		string text = _search.Text.Trim();
+		if (!it.IsChecked && text.Length != 0)
+		{
+			return it.Label.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
+		}
+		return true;
+	}
 
-        private static Label NewLabel(string text) => new Label { Content = text, VerticalAlignment = VerticalAlignment.Center, Padding = new Thickness(0) };
+	private void RefreshList()
+	{
+		_list.Items.Clear();
+		foreach (TypeItem item2 in _items.Where(Visible))
+		{
+			TypeItem item = item2;
+			CheckBox checkBox = new CheckBox
+			{
+				Content = item.Label + "   [" + item.Kind + "]",
+				IsChecked = item.IsChecked
+			};
+			checkBox.Checked += (object s, RoutedEventArgs e) =>
+			{
+				item.IsChecked = true;
+				UpdateCount();
+			};
+			checkBox.Unchecked += (object s, RoutedEventArgs e) =>
+			{
+				item.IsChecked = false;
+				UpdateCount();
+			};
+			_list.Items.Add(checkBox);
+		}
+		UpdateCount();
+	}
 
-        private static void AddRow(Grid grid, int row, UIElement left, UIElement right)
-        {
-            Grid.SetRow(left, row); Grid.SetColumn(left, 0);
-            Grid.SetRow(right, row); Grid.SetColumn(right, 1);
-            grid.Children.Add(left);
-            grid.Children.Add(right);
-        }
+	private void UpdateCount()
+	{
+		_countLabel.Content = $"{_items.Count((TypeItem i) => i.IsChecked)} selected";
+	}
 
-        // Los marcados siempre se ven, aunque no coincidan con la búsqueda
-        private bool Visible(TypeItem it)
-        {
-            string q = _search.Text.Trim();
-            return it.IsChecked || q.Length == 0 || it.Label.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0;
-        }
+	private void LoadFamilies()
+	{
+		OpenFileDialog openFileDialog = new OpenFileDialog
+		{
+			Filter = "Revit families (*.rfa)|*.rfa",
+			Multiselect = true,
+			Title = "Load TV families"
+		};
+		if (openFileDialog.ShowDialog(this) != true)
+		{
+			return;
+		}
+		try
+		{
+			Tuple<List<TypeItem>, HashSet<long>> tuple = _loadRfa(openFileDialog.FileNames);
+			HashSet<long> hashSet = new HashSet<long>(from i in _items
+				where i.IsChecked
+				select i.Id);
+			foreach (TypeItem item in tuple.Item1)
+			{
+				item.IsChecked = hashSet.Contains(item.Id) || tuple.Item2.Contains(item.Id);
+			}
+			_items = tuple.Item1;
+			RefreshList();
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show(this, "Could not load the families:\n" + ex.Message, "Place TV");
+		}
+	}
 
-        private void RefreshList()
-        {
-            _list.Items.Clear();
-            foreach (var it in _items.Where(Visible))
-            {
-                var item = it;
-                var cb = new CheckBox { Content = $"{item.Label}   [{item.Kind}]", IsChecked = item.IsChecked };
-                cb.Checked += (s, e) => { item.IsChecked = true; UpdateCount(); };
-                cb.Unchecked += (s, e) => { item.IsChecked = false; UpdateCount(); };
-                _list.Items.Add(cb);
-            }
-            UpdateCount();
-        }
+	private static double? ParseNumber(string s)
+	{
+		if (!double.TryParse(s.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var result))
+		{
+			return null;
+		}
+		return result;
+	}
 
-        private void UpdateCount() => _countLabel.Content = $"{_items.Count(i => i.IsChecked)} type(s) checked";
-
-        private void LoadFamilies()
-        {
-            var ofd = new OpenFileDialog { Filter = "Revit families (*.rfa)|*.rfa", Multiselect = true, Title = "Load TV families" };
-            if (ofd.ShowDialog(this) != true) return;
-
-            try
-            {
-                var result = _loadRfa(ofd.FileNames);
-                var keep = new HashSet<long>(_items.Where(i => i.IsChecked).Select(i => i.Id));
-                foreach (var it in result.Item1)
-                    it.IsChecked = keep.Contains(it.Id) || result.Item2.Contains(it.Id);
-                _items = result.Item1;
-                RefreshList();
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Could not load the families:\n{ex.Message}", Title_);
-            }
-        }
-
-        // Acepta "4.5" y "4,5"
-        private static double? ParseNumber(string s) =>
-            double.TryParse(s.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double v) ? v : (double?)null;
-
-        private void Accept()
-        {
-            if (!_items.Any(i => i.IsChecked))
-            {
-                MessageBox.Show(this, "Check at least one TV type.", Title_);
-                return;
-            }
-
-            bool auto = _sizeBox.SelectedIndex == 0;
-            if (auto)
-            {
-                double? f = ParseNumber(_factorBox.Text);
-                if (f == null || f <= 0) { MessageBox.Show(this, "Invalid room depth factor.", Title_); return; }
-                DepthFactor = f.Value;
-            }
-
-            if (_useBottom.IsChecked == true)
-            {
-                double? h = _parseLength(_bottomBox.Text);
-                if (h == null || h < 0) { MessageBox.Show(this, "Invalid bottom edge height.", Title_); return; }
-                BottomHeight = h;
-            }
-            else BottomHeight = null;
-
-            double? c = _parseLength(_clearBox.Text);
-            if (c == null || c < 0) { MessageBox.Show(this, "Invalid clearance.", Title_); return; }
-            Clearance = c.Value;
-
-            // Guardar opciones para la próxima corrida
-            _settings.Filter = _search.Text;
-            _settings.AutoSize = auto;
-            _settings.FactorText = _factorBox.Text;
-            _settings.UseBottom = BottomHeight.HasValue;
-            _settings.BottomText = _bottomBox.Text;
-            _settings.ClearText = _clearBox.Text;
-            _settings.Preview = _previewBox.IsChecked == true;
-            _settings.LastChecked = new HashSet<long>(SelectedIds);
-
-            DialogResult = true;
-            Close();
-        }
-    }
+	private void Accept()
+	{
+		if (!_items.Any((TypeItem i) => i.IsChecked))
+		{
+			MessageBox.Show(this, "Check at least one TV type.", "Place TV");
+			return;
+		}
+		bool flag = _sizeBox.SelectedIndex == 0;
+		if (flag)
+		{
+			double? num = ParseNumber(_factorBox.Text);
+			if (!num.HasValue || num <= 0.0)
+			{
+				MessageBox.Show(this, "Invalid room depth factor.", "Place TV");
+				return;
+			}
+			DepthFactor = num.Value;
+		}
+		if (_useBottom.IsChecked == true)
+		{
+			double? num2 = _parseLength(_bottomBox.Text);
+			if (!num2.HasValue || num2 < 0.0)
+			{
+				MessageBox.Show(this, "Invalid bottom edge height.", "Place TV");
+				return;
+			}
+			BottomHeight = num2;
+		}
+		else
+		{
+			BottomHeight = null;
+		}
+		double? num3 = _parseLength(_clearBox.Text);
+		if (!num3.HasValue || num3 < 0.0)
+		{
+			MessageBox.Show(this, "Invalid clearance.", "Place TV");
+			return;
+		}
+		Clearance = num3.Value;
+		_settings.Filter = _search.Text;
+		_settings.AutoSize = flag;
+		_settings.FactorText = _factorBox.Text;
+		_settings.UseBottom = BottomHeight.HasValue;
+		_settings.BottomText = _bottomBox.Text;
+		_settings.ClearText = _clearBox.Text;
+		_settings.Preview = _previewBox.IsChecked == true;
+		_settings.LastChecked = new HashSet<long>(SelectedIds);
+		DialogResult = true;
+		Close();
+	}
 }

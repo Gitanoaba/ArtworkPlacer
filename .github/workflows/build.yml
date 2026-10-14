@@ -37,6 +37,7 @@ jobs:
             ArtworkPlacer.addin
             ArtworkPlacer.png
             TvPlacer.png
+            RoomStudio.png
             AlignHeights.png
             Install.bat
             Uninstall.bat

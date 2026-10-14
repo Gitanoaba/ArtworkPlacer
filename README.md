@@ -2,6 +2,17 @@
 
 Revit 2024 add-in that automatically places artwork on walls and TVs in meeting rooms, and lines up artwork heights.
 
+## Room Studio
+
+**Room Studio** (in the **Qbiq Tools** tab) opens a qbiq-styled window with a floor plan of the level, drawn from the model's rooms and walls.
+
+- **Suggestions on open:** it proposes artwork on the longest drywall walls of offices, corridors, lobbies and similar rooms, plus long drywall walls with no room behind them. It skips toilets, storage, stairs, lifts, server/electrical rooms, phone booths and rooms under 8 m², and drops any suggestion where no piece fits. **Suggest artwork** adds more.
+- **Walls:** every drywall wall face is a dashed line. Click one to put artwork on it, including walls with no room. Click a blue wall to take it off. Hover for the room, length and wall type; red walls can't fit a piece, and hovering shows why.
+- **Rooms:** click a room (Shift-click for more) and choose **Nothing**, **Artwork** or **TV**. Meeting rooms, conference rooms and boardrooms start with a TV. For one selected room, **Walls in this room** lists its walls: tick the ones for artwork, or pick the TV wall.
+- **TVs:** click a TV to move it to the next wall that fits, or click a dashed wall in the room to move it there.
+- **Drywall only** (on by default): pieces go only on wall faces whose finish layers on that side are gypsum, drywall, plasterboard, GWB, sheetrock or גבס. If a wall type has no materials, its name is used instead.
+- The plan updates live. **Place in model** places exactly what's shown, as a single Undo, and selects the new pieces.
+
 ## Place Artwork
 
 When you click **Place Artwork** (in the **Qbiq Tools** tab):
@@ -45,7 +56,7 @@ You need the install package (a folder with `Install.bat`, `ArtworkPlacer.dll`, 
 1. **Close Revit**
 2. If you got the package as a `.zip`, extract it first (right-click → **Extract All**)
 3. Double-click **`Install.bat`**
-4. Open Revit: you'll see the **Qbiq Tools** tab with **Place Artwork**, **Align Heights** and **Place TV**
+4. Open Revit: you'll see the **Qbiq Tools** tab with **Room Studio**, **Place Artwork**, **Align Heights** and **Place TV**
 
 `Install.bat` copies the files to `%APPDATA%\Autodesk\Revit\Addins\2024` and unblocks them, so Windows doesn't block the DLL. To update, run the new package's `Install.bat` the same way. To remove the tools, run `Uninstall.bat`.
 
