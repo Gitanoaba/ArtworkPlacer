@@ -65,21 +65,42 @@ internal static class LogoFamily
 				profile.Append(loop);
 				SketchPlane plane = SketchPlane.Create(fam, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero));
 				Extrusion ex = fam.FamilyCreate.NewExtrusion(true, profile, plane, Depth);
+				if (fam.FamilyManager.Types.Size == 0)
+				{
+					fam.FamilyManager.NewType("Logo");
+				}
 				FamilyParameter mat = fam.FamilyManager.AddParameter(MaterialParam, GroupTypeId.Materials, SpecTypeId.Reference.Material, false);
 				fam.FamilyManager.AssociateElementParameterToFamilyParameter(ex.get_Parameter(BuiltInParameter.MATERIAL_ID_PARAM), mat);
 				t.Commit();
 			}
+			// Guardarla primero le da el nombre "Qbiq Logo"; después el documento se carga a sí mismo en el proyecto
 			fam.SaveAs(path, new SaveAsOptions { OverwriteExistingFile = true });
+			Family loaded = null;
+			string why = null;
+			try
+			{
+				loaded = fam.LoadFamily(doc, new Overwrite());
+			}
+			catch (Exception ex)
+			{
+				why = ex.Message;
+			}
+			loaded = loaded ?? new FilteredElementCollector(doc).OfClass(typeof(Family)).Cast<Family>().FirstOrDefault((Family f) => f.Name == FamilyName);
+			if (loaded == null)
+			{
+				throw new InvalidOperationException("Revit didn't load the logo family into the project" + ((why != null) ? (": " + why) : " (no reason given)"));
+			}
+			ElementId typeId = loaded.GetFamilySymbolIds().FirstOrDefault();
+			if (typeId == null)
+			{
+				throw new InvalidOperationException("the logo family loaded with no types");
+			}
+			return doc.GetElement(typeId) as FamilySymbol;
 		}
 		finally
 		{
 			fam.Close(false);
 		}
-		if (!doc.LoadFamily(path, new Overwrite(), out var family) || family == null)
-		{
-			family = new FilteredElementCollector(doc).OfClass(typeof(Family)).Cast<Family>().FirstOrDefault((Family f) => f.Name == FamilyName);
-		}
-		return (family == null) ? null : (doc.GetElement(family.GetFamilySymbolIds().First()) as FamilySymbol);
 	}
 
 	private static string FindTemplate(RevitApp app)
