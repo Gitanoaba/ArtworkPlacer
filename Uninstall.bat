@@ -12,7 +12,7 @@ if not errorlevel 1 (
   exit /b 1
 )
 
-for %%F in (ArtworkPlacer.dll ArtworkPlacer.addin ArtworkPlacer.png AlignHeights.png TvPlacer.png RoomStudio.png) do (
+for %%F in (ArtworkPlacer.dll ArtworkPlacer.addin ArtworkPlacer.png AlignHeights.png TvPlacer.png RoomStudio.png LogoPlacer.png) do (
   if exist "%DEST%\%%F" del /F /Q "%DEST%\%%F"
 )
 
