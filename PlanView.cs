@@ -174,6 +174,10 @@ public class PlanView : FrameworkElement
 			}
 			dc.DrawGeometry(null, pen, g);
 		}
+		foreach (PlanDoor door in _level.Doors)
+		{
+			DrawDoor(dc, door);
+		}
 		foreach (PlanRoom room in _level.Rooms.Where((PlanRoom r) => r.Problem != null && !r.Selected))
 		{
 			dc.DrawGeometry(null, ProblemPen, RoomGeometry(room));
@@ -200,8 +204,49 @@ public class PlanView : FrameworkElement
 		}
 		else if (_hoverFace != null)
 		{
-			DrawTip(dc, _hoverFace.Title, _hoverFace.WallType + ". " + FaceHint(_hoverFace), dpi);
+			DrawTip(dc, _hoverFace.Title, _hoverFace.WallType + (_hoverFace.Core ? ", core wall. " : ". ") + FaceHint(_hoverFace), dpi);
 		}
+	}
+
+	// Puerta: abertura en blanco sobre el muro y la hoja abierta con su barrido
+	private void DrawDoor(DrawingContext dc, PlanDoor door)
+	{
+		Vector along = door.Along;
+		along.Normalize();
+		Vector facing = door.Facing;
+		if (facing.LengthSquared < 1E-09)
+		{
+			facing = new Vector(0.0 - along.Y, along.X);
+		}
+		facing.Normalize();
+		Point c = door.Center;
+		Point hinge = c - along * (door.Width / 2.0);
+		Point latch = c + along * (door.Width / 2.0);
+		Point open = hinge + facing * door.Width;
+		dc.DrawLine(DoorGapPen(), ToScreen(hinge), ToScreen(latch));
+		dc.DrawLine(DoorPen, ToScreen(hinge), ToScreen(open));
+		Point h = ToScreen(hinge);
+		Vector toOpen = ToScreen(open) - h;
+		Vector toLatch = ToScreen(latch) - h;
+		SweepDirection sweep = (Vector.CrossProduct(toOpen, toLatch) > 0.0) ? SweepDirection.Clockwise : SweepDirection.Counterclockwise;
+		StreamGeometry swing = new StreamGeometry();
+		using (StreamGeometryContext ctx = swing.Open())
+		{
+			ctx.BeginFigure(ToScreen(open), isFilled: false, isClosed: false);
+			double r = door.Width * _scale;
+			ctx.ArcTo(ToScreen(latch), new Size(r, r), 0.0, isLargeArc: false, sweep, isStroked: true, isSmoothJoin: false);
+		}
+		swing.Freeze();
+		dc.DrawGeometry(null, DoorSwingPen, swing);
+	}
+
+	private static readonly Pen DoorPen = Freeze(new Pen(Theme.Danger, 1.6));
+
+	private static readonly Pen DoorSwingPen = Freeze(new Pen(Theme.Danger, 1.0) { DashStyle = new DashStyle(new double[] { 3, 2 }, 0) });
+
+	private Pen DoorGapPen()
+	{
+		return new Pen(Theme.Panel, Math.Max(3.0, 0.6 * _scale)) { StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat };
 	}
 
 	private RoomUse UseOf(long roomId)
@@ -226,7 +271,7 @@ public class PlanView : FrameworkElement
 	{
 		if (!f.Allowed)
 		{
-			return "Not drywall, nothing goes here.";
+			return (f.Reason ?? "Nothing goes here") + ".";
 		}
 		bool tv = UseOf(f.RoomId) == RoomUse.Tv;
 		if (f.On && f.Problem != null)
@@ -489,12 +534,13 @@ public class PlanView : FrameworkElement
 		{
 			return null;
 		}
+		// Las caras bloqueadas también responden al mouse, para mostrar por qué no se pueden usar
 		return (from f in _faces
-			where f.LevelId == _level.Id && f.Allowed
+			where f.LevelId == _level.Id
 			let l = FaceLine(f)
 			let d = DistanceToSegment(screen, l[0], l[1])
 			where d < 6.0
-			orderby d
+			orderby f.Allowed descending, d
 			select f).FirstOrDefault();
 	}
 

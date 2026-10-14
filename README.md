@@ -6,11 +6,18 @@ Revit 2024 add-in that automatically places artwork on walls and TVs in meeting 
 
 **Room Studio** (in the **Qbiq Tools** tab) opens a qbiq-styled window with a floor plan of the level, drawn from the model's rooms and walls.
 
-- **Suggestions on open:** it proposes artwork on the longest drywall walls of offices, corridors, lobbies and similar rooms, plus long drywall walls with no room behind them. It skips toilets, storage, stairs, lifts, server/electrical rooms, phone booths and rooms under 8 m², and drops any suggestion where no piece fits. **Suggest artwork** adds more.
-- **Walls:** every drywall wall face is a dashed line. Click one to put artwork on it, including walls with no room. Click a blue wall to take it off. Hover for the room, length and wall type; red walls can't fit a piece, and hovering shows why.
+- **Where things can go:**
+  - **Never:** walls with windows (or an embedded curtain wall), and wall faces that look outside the building. "Outside" is detected from the rooms and floor slabs on the level.
+  - **No artwork by default:** private offices, restrooms, storage, stairs, lifts and other service rooms. Tick **Allow artwork in private offices**, or choose **Artwork** for one room, to use them anyway.
+  - **Core walls:** thick interior walls (18 cm or more) can hold artwork even when they aren't drywall.
+  - **Blocked walls:** hover over one to see why it's blocked.
+- **Suggestions on open:** it proposes artwork on the longest usable walls of corridors, lobbies, open spaces and similar rooms, plus long usable walls with no room behind them. It drops any suggestion where no piece fits. **Suggest artwork** adds more.
+- **Walls:** every usable wall face is a dashed line. Click one to put artwork on it, including walls with no room. Click a blue wall to take it off. Hover for the room, length and wall type; red walls can't fit a piece, and hovering shows why.
+- **Doors** are drawn on the plan (red, with their swing). Artwork and TVs keep clear of them.
+- **Collections:** pick an `Artwork_*` section under **Artwork → Collection** to use its pieces for the whole plan. Select one room to give it its own collection, for example HQ pieces in reception and Qbiq pieces everywhere else.
 - **Rooms:** click a room (Shift-click for more) and choose **Nothing**, **Artwork** or **TV**. Meeting rooms, conference rooms and boardrooms start with a TV. For one selected room, **Walls in this room** lists its walls: tick the ones for artwork, or pick the TV wall.
 - **TVs:** click a TV to move it to the next wall that fits, or click a dashed wall in the room to move it there.
-- **Drywall only** (on by default): pieces go only on wall faces whose finish layers on that side are gypsum, drywall, plasterboard, GWB, sheetrock or גבס. If a wall type has no materials, its name is used instead.
+- **Drywall only** (on by default): pieces go only on wall faces whose finish on that side is gypsum, drywall, plasterboard, GWB, sheetrock or גבס (or whose wall type name says so). Core walls are the exception.
 - The plan updates live. **Place in model** places exactly what's shown, as a single Undo, and selects the new pieces.
 
 ## Place Artwork

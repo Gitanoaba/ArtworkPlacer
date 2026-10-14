@@ -139,30 +139,39 @@ internal static class RoomScope
 		return faces;
 	}
 
+	// Solo cuenta la terminación de ese lado: la capa exterior (o la siguiente si la primera es pintura).
+	// Así una fachada con yeso escondido detrás del revestimiento no pasa por drywall.
 	public static bool IsDrywall(Wall wall, int sign)
 	{
-		Document doc = wall.Document;
-		CompoundStructure cs = wall.WallType.GetCompoundStructure();
-		List<CompoundStructureLayer> layers = cs?.GetLayers().ToList() ?? new List<CompoundStructureLayer>();
-		if (layers.Count > 0)
+		if (HasDryWord(wall.WallType.Name))
 		{
-			int first = cs.GetFirstCoreLayerIndex();
-			int last = cs.GetLastCoreLayerIndex();
-			IEnumerable<int> side = (sign > 0) ? Enumerable.Range(0, Math.Max(1, first + 1)) : Enumerable.Range(Math.Min(last, layers.Count - 1), layers.Count - Math.Min(last, layers.Count - 1));
-			List<string> texts = (from i in side
-				let m = doc.GetElement(layers[i].MaterialId) as Material
-				where m != null
-				select m.Name + " " + m.MaterialClass + " " + m.MaterialCategory).ToList();
-			if (texts.Any(HasDryWord))
+			return true;
+		}
+		Document doc = wall.Document;
+		IList<CompoundStructureLayer> layers = wall.WallType.GetCompoundStructure()?.GetLayers();
+		if (layers == null || layers.Count == 0)
+		{
+			return false;
+		}
+		IEnumerable<int> outsideIn = (sign > 0) ? Enumerable.Range(0, layers.Count) : Enumerable.Range(0, layers.Count).Reverse();
+		foreach (int i in outsideIn)
+		{
+			CompoundStructureLayer layer = layers[i];
+			if (layer.Function == MaterialFunctionAssignment.Membrane || layer.Width <= 0.0)
+			{
+				continue;
+			}
+			Material m = doc.GetElement(layer.MaterialId) as Material;
+			if (m != null && HasDryWord(m.Name + " " + m.MaterialClass + " " + m.MaterialCategory))
 			{
 				return true;
 			}
-			if (texts.Count > 0)
+			if (layer.Function != MaterialFunctionAssignment.Finish2)
 			{
 				return false;
 			}
 		}
-		return HasDryWord(wall.WallType.Name);
+		return false;
 	}
 
 	private static bool HasDryWord(string text)

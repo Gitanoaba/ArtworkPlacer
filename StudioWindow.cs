@@ -45,6 +45,14 @@ public class StudioWindow : Window
 
 	private readonly CheckBox _drywallOnly = new CheckBox { Content = "Only on drywall" };
 
+	private readonly CheckBox _artInOffices = new CheckBox { Content = "Allow artwork in private offices" };
+
+	private readonly ComboBox _collectionBox = new ComboBox();
+
+	private const string TickedTypes = "Ticked types below";
+
+	private const string SameAsPlan = "Same as the plan";
+
 	private readonly TextBlock _summary = new TextBlock { FontWeight = FontWeights.Medium, TextTrimming = TextTrimming.CharacterEllipsis };
 
 	private readonly TextBlock _status = new TextBlock { Foreground = Theme.Muted, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0.0, 2.0, 0.0, 0.0) };
@@ -87,9 +95,22 @@ public class StudioWindow : Window
 		_tvBottomBox.Text = settings.TvBottomText;
 		_autoSize.IsChecked = settings.TvAutoSize;
 		_drywallOnly.IsChecked = settings.DrywallOnly;
+		_artInOffices.IsChecked = settings.ArtInOffices;
 		foreach (TypeItem t in host.ArtTypes)
 		{
 			t.IsChecked = (settings.ArtChecked.Count > 0) ? settings.ArtChecked.Contains(t.Id) : t.IsChecked;
+		}
+		_collectionBox.Items.Add(TickedTypes);
+		host.Collections.ForEach((ArtCollection c) => _collectionBox.Items.Add(c.Name));
+		int startCollection = host.Collections.FindIndex((ArtCollection c) => c.Name == settings.Collection);
+		_collectionBox.SelectedIndex = startCollection + 1;
+		if (startCollection >= 0)
+		{
+			TickCollection(host.Collections[startCollection]);
+		}
+		foreach (PlanRoom room in host.Levels.SelectMany((PlanLevel l) => l.Rooms))
+		{
+			room.Collection = (settings.RoomCollections.TryGetValue(room.Id, out var rc) && host.Collections.Any((ArtCollection c) => c.Name == rc)) ? rc : null;
 		}
 		foreach (TypeItem t in host.TvTypes)
 		{
@@ -135,8 +156,17 @@ public class StudioWindow : Window
 		_plan.RoomClicked += (room, add) => Select(room, add);
 		_plan.BackgroundClicked += () => Select(null, add: false);
 		_plan.MarkerClicked += OnMarker;
-		_plan.FaceClicked += (face) => Apply(_host.ChangeFace(face.Key));
-		_suggestButton.Click += (s, e) => Apply(_host.Suggest());
+		_plan.FaceClicked += (face) => Run(() => _host.ChangeFace(face.Key));
+		_suggestButton.Click += (s, e) => Run(() => _host.Suggest());
+		_collectionBox.SelectionChanged += (s, e) =>
+		{
+			if (_collectionBox.SelectedIndex > 0)
+			{
+				TickCollection(_host.Collections[_collectionBox.SelectedIndex - 1]);
+				RefreshTypes();
+				Later();
+			}
+		};
 		_placeButton.Click += (s, e) => Accept();
 		_replan = new DispatcherTimer(TimeSpan.FromMilliseconds(600.0), DispatcherPriority.Background, (s, e) => Replan(), Dispatcher);
 		_replan.Stop();
@@ -149,7 +179,7 @@ public class StudioWindow : Window
 		{
 			box.TextChanged += (s, e) => Later();
 		}
-		foreach (CheckBox box in new[] { _autoSize, _drywallOnly })
+		foreach (CheckBox box in new[] { _autoSize, _drywallOnly, _artInOffices })
 		{
 			box.Checked += (s, e) => Later();
 			box.Unchecked += (s, e) => Later();
@@ -159,6 +189,13 @@ public class StudioWindow : Window
 		ShowPlan();
 		_summary.Text = "Planning…";
 		Loaded += (s, e) => Dispatcher.BeginInvoke(DispatcherPriority.Background, (Action)Start);
+	}
+
+	// Elegir una sección Artwork_* marca exactamente sus tipos, como en Place Artwork
+	private void TickCollection(ArtCollection c)
+	{
+		HashSet<long> ids = new HashSet<long>(c.Ids);
+		_host.ArtTypes.ForEach((TypeItem t) => t.IsChecked = ids.Contains(t.Id));
 	}
 
 	internal static bool IsMeeting(string name)
@@ -188,7 +225,8 @@ public class StudioWindow : Window
 		};
 		legend.Children.Add(Swatch(Theme.Accent, dashed: false, "Artwork wall"));
 		legend.Children.Add(Swatch(Theme.Dark, dashed: false, "TV wall"));
-		legend.Children.Add(Swatch(Theme.Accent, dashed: true, "Free drywall, click to use"));
+		legend.Children.Add(Swatch(Theme.Accent, dashed: true, "Free wall, click to use"));
+		legend.Children.Add(Swatch(Theme.Danger, dashed: false, "Door"));
 		legend.Children.Add(new TextBlock
 		{
 			Text = "Scroll to zoom, drag to move.",
@@ -239,7 +277,19 @@ public class StudioWindow : Window
 		dryNote.FontSize = 12.0;
 		dryNote.Margin = new Thickness(24.0, 2.0, 0.0, 0.0);
 		stack.Children.Add(dryNote);
+		_artInOffices.Margin = new Thickness(0.0, 12.0, 0.0, 0.0);
+		stack.Children.Add(_artInOffices);
+		TextBlock officeNote = Theme.Note("Offices, restrooms, storage and service rooms get no artwork. Window walls and the facade never do. To use one office anyway, choose Artwork for that room.");
+		officeNote.FontSize = 12.0;
+		officeNote.Margin = new Thickness(24.0, 2.0, 0.0, 0.0);
+		stack.Children.Add(officeNote);
 		stack.Children.Add(Section("Artwork"));
+		if (_host.Collections.Count > 0)
+		{
+			StackPanel collection = Field("Collection", _collectionBox);
+			collection.Margin = new Thickness(0.0, 0.0, 0.0, 8.0);
+			stack.Children.Add(collection);
+		}
 		stack.Children.Add(TypeBox(_artList));
 		stack.Children.Add(Field("Height", Pair(_alignBox, _heightBox)));
 		stack.Children.Add(Field("Clear of doors and corners", _clearBox));
@@ -497,10 +547,32 @@ public class StudioWindow : Window
 		{
 			_selection.Children.Add(new TextBlock { Text = sel[0].Problem, Foreground = Theme.Danger, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0.0, 10.0, 0.0, 0.0) });
 		}
+		if (sel.Count == 1 && sel[0].Use != RoomUse.Tv && _host.Collections.Count > 0)
+		{
+			AddRoomCollection(sel[0]);
+		}
 		if (sel.Count == 1 && _state != null)
 		{
 			AddWallsList(sel[0]);
 		}
+	}
+
+	// Colección propia del room (p.ej. Artwork_HQ en la recepción y Artwork_Qbiq en el resto)
+	private void AddRoomCollection(PlanRoom room)
+	{
+		ComboBox box = new ComboBox();
+		box.Items.Add(SameAsPlan);
+		_host.Collections.ForEach((ArtCollection c) => box.Items.Add(c.Name));
+		box.SelectedIndex = _host.Collections.FindIndex((ArtCollection c) => c.Name == room.Collection) + 1;
+		box.SelectionChanged += (s, e) =>
+		{
+			string name = (box.SelectedIndex > 0) ? _host.Collections[box.SelectedIndex - 1].Name : null;
+			room.Collection = name;
+			Run(() => _host.SetRoomCollection(room.Id, name));
+		};
+		StackPanel field = Field("Artwork collection for this room", box);
+		field.Margin = new Thickness(0.0, 14.0, 0.0, 0.0);
+		_selection.Children.Add(field);
 	}
 
 	private void AddWallsList(PlanRoom room)
@@ -540,7 +612,7 @@ public class StudioWindow : Window
 			text.Children.Add(new TextBlock { Text = title, FontWeight = FontWeights.Medium });
 			text.Children.Add(new TextBlock
 			{
-				Text = face.Allowed ? face.WallType : (face.WallType + ", not drywall"),
+				Text = face.Allowed ? (face.Core ? (face.WallType + ", core wall") : face.WallType) : (face.WallType + ". " + face.Reason),
 				Foreground = Theme.Muted,
 				FontSize = 11.5,
 				TextTrimming = TextTrimming.CharacterEllipsis
@@ -552,8 +624,8 @@ public class StudioWindow : Window
 			Grid.SetColumn(text, 1);
 			g.Children.Add(text);
 			Border row = Row(g);
-			row.ToolTip = face.Allowed ? null : "Only drywall can hold a TV or artwork";
-			Hook(row, () => Apply(_host.ChangeFace(face.Key)));
+			row.ToolTip = face.Allowed ? null : face.Reason;
+			Hook(row, () => Run(() => _host.ChangeFace(face.Key)));
 			_selection.Children.Add(row);
 		}
 	}
@@ -614,6 +686,10 @@ public class StudioWindow : Window
 		{
 			item.IsChecked = !item.IsChecked;
 			check.IsChecked = item.IsChecked;
+			if (_host.ArtTypes.Contains(item))
+			{
+				_collectionBox.SelectedIndex = 0;
+			}
 			Later();
 		});
 		return row;
@@ -685,7 +761,9 @@ public class StudioWindow : Window
 			TvTypes = _host.TvTypes.Where((TypeItem t) => t.IsChecked).Select((TypeItem t) => t.Id).ToList(),
 			ArtAlign = (HeightAlign)_alignBox.SelectedIndex,
 			TvAutoSize = _autoSize.IsChecked == true,
-			DrywallOnly = _drywallOnly.IsChecked == true
+			DrywallOnly = _drywallOnly.IsChecked == true,
+			ArtInOffices = _artInOffices.IsChecked == true,
+			RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection)
 		};
 		if (req.ArtAlign != HeightAlign.FamilyDefault)
 		{
@@ -727,7 +805,7 @@ public class StudioWindow : Window
 	{
 		if (m.Use == RoomUse.Tv && !m.Skipped)
 		{
-			Apply(_host.MoveTv(m.RoomId));
+			Run(() => _host.MoveTv(m.RoomId));
 			return;
 		}
 		if (!_skipped.Remove(m.Key))
@@ -771,5 +849,8 @@ public class StudioWindow : Window
 		_settings.TvBottomText = _tvBottomBox.Text;
 		_settings.TvAutoSize = _autoSize.IsChecked == true;
 		_settings.DrywallOnly = _drywallOnly.IsChecked == true;
+		_settings.ArtInOffices = _artInOffices.IsChecked == true;
+		_settings.Collection = (_collectionBox.SelectedIndex > 0) ? _host.Collections[_collectionBox.SelectedIndex - 1].Name : null;
+		_settings.RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection);
 	}
 }

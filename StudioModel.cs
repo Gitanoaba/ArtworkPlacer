@@ -30,6 +30,8 @@ public class PlanRoom
 
 	public string Problem;
 
+	public string Collection;
+
 	public string Title => (Number.Length == 0) ? Name : (Name + " " + Number);
 }
 
@@ -38,6 +40,17 @@ public class PlanWall
 	public Point[] Path;
 
 	public double Thickness;
+}
+
+public class PlanDoor
+{
+	public Point Center;
+
+	public Vector Along;
+
+	public Vector Facing;
+
+	public double Width;
 }
 
 public class PlanLevel
@@ -49,6 +62,8 @@ public class PlanLevel
 	public List<PlanRoom> Rooms = new List<PlanRoom>();
 
 	public List<PlanWall> Walls = new List<PlanWall>();
+
+	public List<PlanDoor> Doors = new List<PlanDoor>();
 }
 
 public class PlanMarker
@@ -96,6 +111,10 @@ public class PlanFace
 
 	public bool Allowed;
 
+	public string Reason;
+
+	public bool Core;
+
 	public bool On;
 
 	public bool Suggested;
@@ -108,6 +127,10 @@ public class StudioRequest
 	public Dictionary<long, RoomUse> Uses = new Dictionary<long, RoomUse>();
 
 	public bool DrywallOnly = true;
+
+	public bool ArtInOffices;
+
+	public Dictionary<long, string> RoomCollections = new Dictionary<long, string>();
 
 	public List<long> ArtTypes = new List<long>();
 
@@ -151,6 +174,8 @@ public interface IStudioHost
 
 	List<TypeItem> TvTypes { get; }
 
+	List<ArtCollection> Collections { get; }
+
 	Thumb Thumb(long typeId);
 
 	double? ParseLength(string text);
@@ -166,6 +191,8 @@ public interface IStudioHost
 	PreviewResult MoveTv(long roomId);
 
 	PreviewResult Suggest();
+
+	PreviewResult SetRoomCollection(long roomId, string collection);
 }
 
 public class StudioSettings
@@ -191,4 +218,10 @@ public class StudioSettings
 	public bool TvAutoSize = true;
 
 	public bool DrywallOnly = true;
+
+	public bool ArtInOffices;
+
+	public string Collection;
+
+	public Dictionary<long, string> RoomCollections = new Dictionary<long, string>();
 }

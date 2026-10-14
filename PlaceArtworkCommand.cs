@@ -279,7 +279,7 @@ public class PlaceArtworkCommand : IExternalCommand
 			select i).ToList();
 	}
 
-	private static List<ArtCollection> CollectCollections(Document doc, List<TypeItem> types)
+	internal static List<ArtCollection> CollectCollections(Document doc, List<TypeItem> types)
 	{
 		HashSet<long> placeable = new HashSet<long>(types.Select((TypeItem t) => t.Id));
 		List<ArtCollection> list = new List<ArtCollection>();
