@@ -27,6 +27,8 @@ internal class RevitStudioHost : IStudioHost
 
 		public string Block;
 
+		public bool Unroomed;
+
 		public bool On;
 
 		public bool Suggested;
@@ -104,6 +106,19 @@ internal class RevitStudioHost : IStudioHost
 
 	private readonly Dictionary<string, List<FamilySymbol>> _collectionSymbols = new Dictionary<string, List<FamilySymbol>>();
 
+	// Rooms "Not Enclosed" de Revit (área 0) que se reconstruyen con el recinto cerrado por los muros
+	private readonly Dictionary<long, FoundRoom> _virtual = new Dictionary<long, FoundRoom>();
+
+	private readonly List<Room> _broken;
+
+	private readonly Dictionary<long, List<FoundRoom>> _enclosures = new Dictionary<long, List<FoundRoom>>();
+
+	private readonly List<string> _notRebuilt = new List<string>();
+
+	private static readonly double SmallSpace = UnitUtils.ConvertToInternalUnits(40.0, UnitTypeId.SquareMeters);
+
+	public string StartNote => (_notRebuilt.Count == 0) ? null : $"{_notRebuilt.Count} room(s) aren't enclosed in Revit and couldn't be rebuilt from the walls: {string.Join(", ", _notRebuilt.Take(5))}{((_notRebuilt.Count > 5) ? "…" : "")}. Fix them in Revit for better results.";
+
 	public List<PlanLevel> Levels { get; }
 
 	public long StartLevel { get; }
@@ -121,9 +136,11 @@ internal class RevitStudioHost : IStudioHost
 		_units = _doc.GetUnits();
 		_thumbs = new TypeThumbnails(_doc, revitVersion);
 		_footprint = new Footprint(_doc);
-		_rooms = (from Room r in new FilteredElementCollector(_doc).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType()
-			where r.Location != null && r.Area > 0.0
-			select r).ToDictionary((Room r) => r.Id.Value);
+		List<Room> placed = (from Room r in new FilteredElementCollector(_doc).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType()
+			where r.Location != null
+			select r).ToList();
+		_rooms = placed.Where((Room r) => r.Area > 0.0).ToDictionary((Room r) => r.Id.Value);
+		_broken = placed.Where((Room r) => r.Area <= 0.0).ToList();
 		Levels = BuildLevels();
 		long active = ((_doc.ActiveView as ViewPlan)?.GenLevel?.Id.Value).GetValueOrDefault(-1L);
 		StartLevel = Levels.Any((PlanLevel l) => l.Id == active) ? active : (Levels.FirstOrDefault()?.Id ?? -1);
@@ -169,11 +186,12 @@ internal class RevitStudioHost : IStudioHost
 			{
 				continue;
 			}
+			List<Room> adopted = AdoptBroken(level, rooms, onLevel);
 			PlanLevel plan = new PlanLevel
 			{
 				Id = level.Id.Value,
 				Name = level.Name,
-				Rooms = rooms.Select(ToPlan).Where((PlanRoom r) => r.Loops.Count > 0).ToList(),
+				Rooms = rooms.Select(ToPlan).Where((PlanRoom r) => r.Loops.Count > 0).Concat(adopted.Select(ToVirtualPlan)).ToList(),
 				Walls = onLevel.Select((Wall w) => new PlanWall
 				{
 					Path = ((LocationCurve)w.Location).Curve.Tessellate().Select((XYZ p) => new Point(p.X, p.Y)).ToArray(),
@@ -186,9 +204,95 @@ internal class RevitStudioHost : IStudioHost
 					select d).ToList()
 			};
 			result.Add(plan);
-			AddFaces(level, rooms, onLevel.Where(Usable).ToList());
+			AddFaces(level, rooms, adopted, onLevel.Where(Usable).ToList());
 		}
 		return result;
+	}
+
+	// Un room "Not Enclosed" toma el recinto de muros que contiene su punto, si ningún room sano ya está ahí
+	private List<Room> AdoptBroken(Level level, List<Room> rooms, List<Wall> onLevel)
+	{
+		List<FoundRoom> found = RoomFinder.Find(onLevel, out _).OrderBy((FoundRoom f) => f.Area).ToList();
+		_enclosures[level.Id.Value] = found;
+		List<Room> broken = _broken.Where((Room r) => r.LevelId == level.Id).ToList();
+		if (broken.Count == 0)
+		{
+			return new List<Room>();
+		}
+		List<XYZ> healthy = rooms.Select((Room r) => (r.Location as LocationPoint)?.Point).Where((XYZ p) => p != null).ToList();
+		List<Room> adopted = new List<Room>();
+		HashSet<FoundRoom> taken = new HashSet<FoundRoom>();
+		foreach (Room room in broken)
+		{
+			XYZ at = ((LocationPoint)room.Location).Point;
+			FoundRoom enclosure = found.FirstOrDefault((FoundRoom f) => Contains(f.Polygon, at));
+			if (enclosure == null || taken.Contains(enclosure) || healthy.Any((XYZ p) => Contains(enclosure.Polygon, p)))
+			{
+				if (enclosure == null)
+				{
+					_notRebuilt.Add((RoomName(room) + " " + (Clean(room.Number) ?? "")).Trim());
+				}
+				continue;
+			}
+			taken.Add(enclosure);
+			_rooms[room.Id.Value] = room;
+			_virtual[room.Id.Value] = enclosure;
+			adopted.Add(room);
+		}
+		return adopted;
+	}
+
+	private static bool Contains(List<XYZ> poly, XYZ p)
+	{
+		bool inside = false;
+		for (int i = 0, j = poly.Count - 1; i < poly.Count; j = i++)
+		{
+			if ((poly[i].Y > p.Y) != (poly[j].Y > p.Y) && p.X < (poly[j].X - poly[i].X) * (p.Y - poly[i].Y) / (poly[j].Y - poly[i].Y) + poly[i].X)
+			{
+				inside = !inside;
+			}
+		}
+		return inside;
+	}
+
+	private PlanRoom ToVirtualPlan(Room room)
+	{
+		FoundRoom found = _virtual[room.Id.Value];
+		XYZ at = ((LocationPoint)room.Location).Point;
+		return new PlanRoom
+		{
+			Id = room.Id.Value,
+			Name = RoomName(room),
+			Number = Clean(room.Number) ?? "",
+			AreaText = UnitFormatUtils.Format(_units, SpecTypeId.Area, found.Area, forEditing: false) + ", not enclosed in Revit (taken from the walls)",
+			Loops = new List<Point[]> { found.Polygon.Select((XYZ p) => new Point(p.X, p.Y)).ToArray() },
+			Label = new Point(at.X, at.Y)
+		};
+	}
+
+	// Caras de un room reconstruido: los muros del recinto, del lado que mira hacia adentro
+	private static List<RoomFace> VirtualFaces(FoundRoom found)
+	{
+		return (from rw in found.Walls
+			where Usable(rw.Wall) && rw.U1 - rw.U0 >= 0.1
+			let line = (Line)((LocationCurve)rw.Wall.Location).Curve
+			let n = rw.Wall.Orientation * rw.Sign
+			let off = n * (rw.Wall.Width / 2.0)
+			select new RoomFace
+			{
+				Wall = rw.Wall,
+				Sign = rw.Sign,
+				U0 = Math.Max(0.0, rw.U0),
+				U1 = Math.Min(line.Length, rw.U1),
+				A = line.GetEndPoint(0) + line.Direction * Math.Max(0.0, rw.U0) + off,
+				B = line.GetEndPoint(0) + line.Direction * Math.Min(line.Length, rw.U1) + off,
+				Normal = n
+			}).ToList();
+	}
+
+	private double AreaOf(long roomId)
+	{
+		return _virtual.TryGetValue(roomId, out var found) ? found.Area : _rooms[roomId].Area;
 	}
 
 	private static PlanDoor ToDoor(FamilyInstance d)
@@ -218,11 +322,13 @@ internal class RevitStudioHost : IStudioHost
 		};
 	}
 
-	private void AddFaces(Level level, List<Room> rooms, List<Wall> walls)
+	private void AddFaces(Level level, List<Room> rooms, List<Room> adopted, List<Wall> walls)
 	{
 		List<FaceState> roomFaces = (from r in rooms
 			from f in RoomScope.Faces(r, _boundary)
 			where Usable(f.Wall)
+			select NewFace(level, r.Id.Value, f)).Concat(from r in adopted
+			from f in VirtualFaces(_virtual[r.Id.Value])
 			select NewFace(level, r.Id.Value, f)).ToList();
 		_faces.AddRange(roomFaces);
 		foreach (Wall wall in walls)
@@ -291,8 +397,22 @@ internal class RevitStudioHost : IStudioHost
 			Face = face,
 			Drywall = dry,
 			Core = info.Core,
-			Block = block
+			Block = block,
+			Unroomed = roomId == 0 && block == null && InSmallSpace(level, face)
 		};
+	}
+
+	// Cara sin room que da a un espacio chico cerrado por muros: probablemente una oficina o sala sin room en Revit
+	private bool InSmallSpace(Level level, RoomFace face)
+	{
+		if (!_enclosures.TryGetValue(level.Id.Value, out var found))
+		{
+			return false;
+		}
+		XYZ mid = (face.A + face.B) / 2.0;
+		XYZ probe = RoomFinder.Flat(mid + face.Normal * 1.0);
+		FoundRoom space = found.FirstOrDefault((FoundRoom f) => Contains(f.Polygon, probe));
+		return space != null && space.Area < SmallSpace;
 	}
 
 	private WallInfo Info(Wall wall)
@@ -562,7 +682,7 @@ internal class RevitStudioHost : IStudioHost
 	{
 		_tvPlans.Remove(roomId);
 		_roomProblems.Remove(roomId);
-		FoundRoom found = RoomScope.Found(_rooms[roomId], _boundary);
+		FoundRoom found = _virtual.TryGetValue(roomId, out var rebuilt) ? rebuilt : RoomScope.Found(_rooms[roomId], _boundary);
 		if (found.Walls.Count == 0)
 		{
 			_roomProblems[roomId] = "No straight walls around this room";
@@ -802,7 +922,7 @@ internal class RevitStudioHost : IStudioHost
 		{
 			Room r = _rooms[room.Key];
 			string name = RoomName(r);
-			double m2 = UnitUtils.ConvertFromInternalUnits(r.Area, UnitTypeId.SquareMeters);
+			double m2 = UnitUtils.ConvertFromInternalUnits(AreaOf(room.Key), UnitTypeId.SquareMeters);
 			bool open = Has(name, OpenWords);
 			if (WallRules.IsService(name) || (m2 < 8.0 && !open) || room.Any((FaceState f) => f.On))
 			{
@@ -813,7 +933,7 @@ internal class RevitStudioHost : IStudioHost
 			picks.AddRange(room.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= min).OrderByDescending((FaceState f) => f.Face.U1 - f.Face.U0).Take(take));
 		}
 		double freeMin = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
-		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && Allowed(f) && f.Face.U1 - f.Face.U0 >= freeMin));
+		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && Allowed(f) && f.Face.U1 - f.Face.U0 >= freeMin));
 		return picks;
 	}
 
@@ -858,7 +978,7 @@ internal class RevitStudioHost : IStudioHost
 			A = new Point(f.Face.A.X, f.Face.A.Y),
 			B = new Point(f.Face.B.X, f.Face.B.Y),
 			Normal = new Vector(f.Face.Normal.X, f.Face.Normal.Y),
-			Title = (f.RoomId != 0) ? $"{side} wall of {RoomName(_rooms[f.RoomId])}, {length}" : $"Wall with no room, {length}",
+			Title = (f.RoomId != 0) ? $"{side} wall of {RoomName(_rooms[f.RoomId])}, {length}" : (f.Unroomed ? $"Wall of a closed space with no room in Revit, {length}" : $"Wall with no room, {length}"),
 			WallType = f.Face.Wall.WallType.Name,
 			Allowed = Allowed(f),
 			Reason = Why(f),

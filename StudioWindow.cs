@@ -421,6 +421,10 @@ public class StudioWindow : Window
 		{
 			Run(() => _host.Suggest());
 		}
+		if (_host.StartNote != null)
+		{
+			Problem(_host.StartNote);
+		}
 	}
 
 	private void Later()

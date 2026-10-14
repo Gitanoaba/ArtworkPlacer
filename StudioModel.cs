@@ -176,6 +176,8 @@ public interface IStudioHost
 
 	List<ArtCollection> Collections { get; }
 
+	string StartNote { get; }
+
 	Thumb Thumb(long typeId);
 
 	double? ParseLength(string text);
