@@ -51,6 +51,8 @@ public class PlanDoor
 	public Vector Facing;
 
 	public double Width;
+
+	public double Thickness;
 }
 
 public class PlanLevel

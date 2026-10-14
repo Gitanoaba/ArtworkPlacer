@@ -303,7 +303,13 @@ internal class RevitStudioHost : IStudioHost
 		{
 			return null;
 		}
-		XYZ along = (d.Host is Wall w && w.Location is LocationCurve { Curve: Line line }) ? line.Direction : d.HandOrientation;
+		XYZ along = d.HandOrientation;
+		if (d.Host is Wall w && w.Location is LocationCurve { Curve: Line line })
+		{
+			along = line.Direction;
+			XYZ p0 = line.GetEndPoint(0);
+			c = p0 + along * (c - p0).DotProduct(along);
+		}
 		double width = d.Symbol.get_Parameter(BuiltInParameter.DOOR_WIDTH)?.AsDouble() ?? 0.0;
 		if (width <= 0.0)
 		{
@@ -318,7 +324,8 @@ internal class RevitStudioHost : IStudioHost
 			Center = new Point(c.X, c.Y),
 			Along = new Vector(along.X, along.Y),
 			Facing = new Vector(d.FacingOrientation.X, d.FacingOrientation.Y),
-			Width = (width > 0.0) ? width : 3.0
+			Width = (width > 0.0) ? width : 3.0,
+			Thickness = (d.Host as Wall)?.Width ?? 0.4
 		};
 	}
 

@@ -208,45 +208,19 @@ public class PlanView : FrameworkElement
 		}
 	}
 
-	// Puerta: abertura en blanco sobre el muro y la hoja abierta con su barrido
+	// Puerta: una línea roja sobre el muro, del ancho de la abertura y del grosor del muro
 	private void DrawDoor(DrawingContext dc, PlanDoor door)
 	{
 		Vector along = door.Along;
+		if (along.LengthSquared < 1E-09)
+		{
+			return;
+		}
 		along.Normalize();
-		Vector facing = door.Facing;
-		if (facing.LengthSquared < 1E-09)
-		{
-			facing = new Vector(0.0 - along.Y, along.X);
-		}
-		facing.Normalize();
-		Point c = door.Center;
-		Point hinge = c - along * (door.Width / 2.0);
-		Point latch = c + along * (door.Width / 2.0);
-		Point open = hinge + facing * door.Width;
-		dc.DrawLine(DoorGapPen(), ToScreen(hinge), ToScreen(latch));
-		dc.DrawLine(DoorPen, ToScreen(hinge), ToScreen(open));
-		Point h = ToScreen(hinge);
-		Vector toOpen = ToScreen(open) - h;
-		Vector toLatch = ToScreen(latch) - h;
-		SweepDirection sweep = (Vector.CrossProduct(toOpen, toLatch) > 0.0) ? SweepDirection.Clockwise : SweepDirection.Counterclockwise;
-		StreamGeometry swing = new StreamGeometry();
-		using (StreamGeometryContext ctx = swing.Open())
-		{
-			ctx.BeginFigure(ToScreen(open), isFilled: false, isClosed: false);
-			double r = door.Width * _scale;
-			ctx.ArcTo(ToScreen(latch), new Size(r, r), 0.0, isLargeArc: false, sweep, isStroked: true, isSmoothJoin: false);
-		}
-		swing.Freeze();
-		dc.DrawGeometry(null, DoorSwingPen, swing);
-	}
-
-	private static readonly Pen DoorPen = Freeze(new Pen(Theme.Danger, 1.6));
-
-	private static readonly Pen DoorSwingPen = Freeze(new Pen(Theme.Danger, 1.0) { DashStyle = new DashStyle(new double[] { 3, 2 }, 0) });
-
-	private Pen DoorGapPen()
-	{
-		return new Pen(Theme.Panel, Math.Max(3.0, 0.6 * _scale)) { StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat };
+		Point a = door.Center - along * (door.Width / 2.0);
+		Point b = door.Center + along * (door.Width / 2.0);
+		Pen pen = new Pen(Theme.Danger, Math.Max(3.0, door.Thickness * _scale)) { StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat };
+		dc.DrawLine(pen, ToScreen(a), ToScreen(b));
 	}
 
 	private RoomUse UseOf(long roomId)
