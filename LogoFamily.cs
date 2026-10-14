@@ -19,7 +19,11 @@ internal static class LogoFamily
 
 	private const string MaterialParam = "Logo Material";
 
-	private const double Depth = 0.02;
+	// La pieza se hunde 9 mm en el muro y sobresale ~1 mm: con un PNG recortado, por el hueco se ve el muro
+	// y no la cara trasera de la pieza (que lleva la imagen espejada)
+	private const double Back = 0.03;
+
+	private const double Proud = 0.004;
 
 	private class Overwrite : IFamilyLoadOptions
 	{
@@ -56,15 +60,15 @@ internal static class LogoFamily
 				t.Start();
 				// Desde el origen hacia +X/+Y: la textura empieza en la esquina de la pieza, sin desfase
 				CurveArray loop = new CurveArray();
-				XYZ[] p = { XYZ.Zero, new XYZ(w, 0.0, 0.0), new XYZ(w, h, 0.0), new XYZ(0.0, h, 0.0) };
+				XYZ[] p = { new XYZ(0.0, 0.0, -Back), new XYZ(w, 0.0, -Back), new XYZ(w, h, -Back), new XYZ(0.0, h, -Back) };
 				for (int i = 0; i < 4; i++)
 				{
 					loop.Append(Line.CreateBound(p[i], p[(i + 1) % 4]));
 				}
 				CurveArrArray profile = new CurveArrArray();
 				profile.Append(loop);
-				SketchPlane plane = SketchPlane.Create(fam, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero));
-				Extrusion ex = fam.FamilyCreate.NewExtrusion(true, profile, plane, Depth);
+				SketchPlane plane = SketchPlane.Create(fam, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, new XYZ(0.0, 0.0, -Back)));
+				Extrusion ex = fam.FamilyCreate.NewExtrusion(true, profile, plane, Back + Proud);
 				if (fam.FamilyManager.Types.Size == 0)
 				{
 					fam.FamilyManager.NewType("Logo");

@@ -90,6 +90,16 @@ public class LogoCommand : IExternalCommand
 			return Result.Failed;
 		}
 
+		// Recepción con un logo ya colocado: recargar la familia y el material ya lo actualizó
+		List<ElementId> existing = new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>()
+			.Where((FamilyInstance fi) => fi.Symbol.Family.Id == symbol.Family.Id).Select((FamilyInstance fi) => fi.Id).ToList();
+		if (window.UseReception && existing.Count > 0)
+		{
+			uidoc.Selection.SetElementIds(existing);
+			TaskDialog.Show(ToolName, $"Updated the logo already in the model ({Fmt(width)} × {Fmt(height)}). It's selected so you can check it. To add it on other walls, select them and run Place Logo again.");
+			return Result.Succeeded;
+		}
+
 		// 3. Colocar como el artwork: una pieza por cara, centrada, con vista previa de la cara
 		WallPlacer placer = new WallPlacer(doc, new List<FamilySymbol> { symbol }, window.CenterHeight, HeightAlign.Center, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters), 0.0, 1, SideMode.Auto, Fmt);
 		List<string> skipped = new List<string>();
