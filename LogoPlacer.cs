@@ -27,7 +27,7 @@ internal class LogoSpot
 	public double FreeLength;
 }
 
-// Guía ya dibujada en el modelo: un rectángulo con diagonales en el plano del muro
+// Guía rosada que dejó la versión anterior (con decals) en el modelo
 internal class LogoGuide
 {
 	public List<ElementId> Curves = new List<ElementId>();
@@ -41,8 +41,8 @@ internal class LogoGuide
 	public double Height;
 }
 
-// La API de Revit 2024 no puede crear ni colocar decals: aquí se elige el lugar, se marca con una guía
-// y, una vez que el usuario coloca el decal, se centra y se ajusta su tamaño a la guía.
+// Elige el muro del logo (recepción/lobby) y encuentra la imagen del cliente.
+// Las guías rosadas eran del primer intento con decals: solo se buscan para borrarlas.
 internal class LogoPlacer : WallFaces
 {
 	public const string GuideStyle = "Qbiq Logo Guide";
@@ -122,10 +122,86 @@ internal class LogoPlacer : WallFaces
 		return best;
 	}
 
-	// Ruta del logo: el texto con la ruta que deja el add-in de Qbiq, o la carpeta del proyecto
+	// Ruta del logo, en orden: la carpeta del Design ID del add-in de Qbiq, un texto o imagen del modelo con la ruta,
+	// la carpeta del proyecto y, por último, el *_client más reciente en la carpeta del usuario
+	public static string FindLogo(Autodesk.Revit.UI.UIApplication uiapp, Document doc)
+	{
+		string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+		string id = DesignId(uiapp);
+		if (!string.IsNullOrEmpty(id))
+		{
+			string byId = ClientImage(Path.Combine(home, id));
+			if (byId != null)
+			{
+				return byId;
+			}
+		}
+		string inModel = FindLogo(doc);
+		if (inModel != null)
+		{
+			return inModel;
+		}
+		try
+		{
+			return Directory.GetDirectories(home).Select(ClientImage).Where((string f) => f != null)
+				.OrderByDescending(File.GetLastWriteTime).FirstOrDefault();
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	private static string ClientImage(string folder)
+	{
+		try
+		{
+			return Directory.Exists(folder) ? Directory.GetFiles(folder, "*_client.*").FirstOrDefault((string f) => ImagePath.IsMatch(f) && f.IndexOf("_logo_", StringComparison.OrdinalIgnoreCase) < 0) : null;
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	// El Design ID que muestra el add-in de Qbiq en su panel del ribbon
+	private static string DesignId(Autodesk.Revit.UI.UIApplication uiapp)
+	{
+		try
+		{
+			foreach (Autodesk.Revit.UI.RibbonPanel panel in uiapp.GetRibbonPanels("Qbiq"))
+			{
+				foreach (Autodesk.Revit.UI.RibbonItem item in panel.GetItems())
+				{
+					if (item is Autodesk.Revit.UI.TextBox tb && tb.Name.IndexOf("design", StringComparison.OrdinalIgnoreCase) >= 0)
+					{
+						return tb.Value?.ToString()?.Trim();
+					}
+				}
+			}
+		}
+		catch
+		{
+		}
+		return null;
+	}
+
 	public static string FindLogo(Document doc)
 	{
 		List<string> found = new List<string>();
+		foreach (ImageType img in new FilteredElementCollector(doc).OfClass(typeof(ImageType)).Cast<ImageType>())
+		{
+			try
+			{
+				if (!string.IsNullOrEmpty(img.Path) && File.Exists(img.Path) && img.Path.IndexOf("_client", StringComparison.OrdinalIgnoreCase) >= 0)
+				{
+					found.Add(img.Path);
+				}
+			}
+			catch
+			{
+			}
+		}
 		foreach (TextNote note in new FilteredElementCollector(doc).OfClass(typeof(TextNote)).Cast<TextNote>())
 		{
 			string text = (note.Text ?? "").Replace("\r", "").Replace("\n", "");
@@ -161,44 +237,6 @@ internal class LogoPlacer : WallFaces
 		return null;
 	}
 
-	public static List<Element> LogoDecalTypes(Document doc)
-	{
-		return (from e in new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_DecalType).WhereElementIsElementType()
-			where e.Name.IndexOf("logo", StringComparison.OrdinalIgnoreCase) >= 0
-			select e).ToList();
-	}
-
-	private static GraphicsStyle GuideLineStyle(Document doc)
-	{
-		Category lines = doc.Settings.Categories.get_Item(BuiltInCategory.OST_Lines);
-		Category sub = lines.SubCategories.Cast<Category>().FirstOrDefault((Category c) => c.Name == GuideStyle);
-		if (sub == null)
-		{
-			sub = doc.Settings.Categories.NewSubcategory(lines, GuideStyle);
-			sub.LineColor = new Color(230, 0, 90);
-			sub.SetLineWeight(6, GraphicsStyleType.Projection);
-		}
-		return sub.GetGraphicsStyle(GraphicsStyleType.Projection);
-	}
-
-	public static List<ElementId> DrawGuide(Document doc, LogoSpot s)
-	{
-		GraphicsStyle style = GuideLineStyle(doc);
-		XYZ c = s.Center + s.Normal * 0.03;
-		SketchPlane plane = SketchPlane.Create(doc, Plane.CreateByNormalAndOrigin(s.Normal, c));
-		XYZ a = s.Along * (s.Width / 2.0);
-		XYZ up = XYZ.BasisZ * (s.Height / 2.0);
-		XYZ[] p = { c - a - up, c + a - up, c + a + up, c - a + up };
-		List<ElementId> ids = new List<ElementId>();
-		foreach (Tuple<int, int> e in new[] { Tuple.Create(0, 1), Tuple.Create(1, 2), Tuple.Create(2, 3), Tuple.Create(3, 0), Tuple.Create(0, 2), Tuple.Create(1, 3) })
-		{
-			ModelCurve mc = doc.Create.NewModelCurve(Line.CreateBound(p[e.Item1], p[e.Item2]), plane);
-			mc.LineStyle = style;
-			ids.Add(mc.Id);
-		}
-		return ids;
-	}
-
 	public static List<LogoGuide> FindGuides(Document doc)
 	{
 		List<LogoGuide> guides = new List<LogoGuide>();
@@ -221,48 +259,5 @@ internal class LogoPlacer : WallFaces
 		return guides;
 	}
 
-	// Centra y dimensiona el decal más cercano a la guía. Devuelve null si salió bien, si no el motivo
-	public static string Snap(Document doc, LogoGuide guide, List<Element> decals)
-	{
-		Element decal = decals.Select((Element d) => new { d, c = Center(d) })
-			.Where(x => x.c != null && Math.Abs((x.c - guide.Center).DotProduct(guide.Normal)) < 1.0 && Flat(x.c - guide.Center, guide.Normal).GetLength() < 10.0)
-			.OrderBy(x => Flat(x.c - guide.Center, guide.Normal).GetLength())
-			.Select(x => x.d)
-			.FirstOrDefault();
-		if (decal == null)
-		{
-			return "no decal near the guide. Place the logo decal inside the pink rectangle first";
-		}
-		Parameter width = decal.get_Parameter(BuiltInParameter.DECAL_WIDTH);
-		Parameter height = decal.get_Parameter(BuiltInParameter.DECAL_HEIGHT);
-		bool locked = decal.get_Parameter(BuiltInParameter.DECAL_LOCK_PROPORTIONS)?.AsInteger() == 1;
-		if (width != null && !width.IsReadOnly && guide.Width > 0.0)
-		{
-			width.Set(guide.Width);
-		}
-		if (!locked && height != null && !height.IsReadOnly && guide.Height > 0.0)
-		{
-			height.Set(guide.Height);
-		}
-		doc.Regenerate();
-		XYZ c = Center(decal);
-		XYZ move = Flat(guide.Center - c, guide.Normal);
-		if (!move.IsZeroLength())
-		{
-			ElementTransformUtils.MoveElement(doc, decal.Id, move);
-		}
-		return null;
-	}
 
-	private static XYZ Center(Element e)
-	{
-		BoundingBoxXYZ bb = e.get_BoundingBox(null);
-		return (bb == null) ? null : ((bb.Min + bb.Max) / 2.0);
-	}
-
-	// Vector sin la componente normal al muro (movimiento dentro del plano del muro)
-	private static XYZ Flat(XYZ v, XYZ normal)
-	{
-		return v - normal * v.DotProduct(normal);
-	}
 }

@@ -8,13 +8,6 @@ using Microsoft.Win32;
 
 namespace ArtworkPlacer;
 
-public enum LogoAction
-{
-	Mark,
-	Snap,
-	RemoveGuides
-}
-
 public class LogoWindow : Window
 {
 	private readonly Func<string, double?> _parse;
@@ -31,23 +24,17 @@ public class LogoWindow : Window
 
 	private readonly TextBox _heightBox = new TextBox();
 
-	private readonly CheckBox _alreadySet = new CheckBox { Content = "The logo decal already has this image (skip Decal Types)" };
-
 	private readonly TextBlock _status = new TextBlock { Foreground = Theme.Danger, TextWrapping = TextWrapping.Wrap };
-
-	public LogoAction Action { get; private set; }
 
 	public string LogoPath { get; private set; }
 
 	public bool UseReception => _reception.IsChecked == true;
 
-	public bool ImageAlreadySet => _alreadySet.IsChecked == true;
-
 	public double LogoWidth { get; private set; }
 
 	public double CenterHeight { get; private set; }
 
-	public LogoWindow(string logoPath, string receptionNames, int selectedWalls, int guides, string widthText, string heightText, Func<string, double?> parse)
+	public LogoWindow(string logoPath, string receptionNames, int selectedWalls, string widthText, string heightText, Func<string, double?> parse)
 	{
 		_parse = parse;
 		Title = "Place Logo";
@@ -98,31 +85,20 @@ public class LogoWindow : Window
 		size.Children.Add(h);
 		body.Children.Add(size);
 
-		_alreadySet.Margin = new Thickness(0.0, 16.0, 0.0, 0.0);
-		body.Children.Add(_alreadySet);
-		TextBlock steps = Theme.Note("Place Logo marks the spot with a pink rectangle and copies the image path. Then Revit's Decal Types opens: pick \"logo\", paste the path as its Source and its Cutout, and click OK. Place the decal inside the rectangle, and run Place Logo again to center and size it exactly.");
+		TextBlock steps = Theme.Note("Builds a \"Qbiq Logo\" family the size of the image, with the image as its material, and centers it on the wall. Check the arrow, click the wall to switch faces, then press ESC to place it. Running it again with another image or size updates the logo already placed.");
 		steps.FontSize = 12.0;
-		steps.Margin = new Thickness(0.0, 10.0, 0.0, 0.0);
+		steps.Margin = new Thickness(0.0, 16.0, 0.0, 0.0);
 		body.Children.Add(steps);
 		_status.Margin = new Thickness(0.0, 10.0, 0.0, 0.0);
 		body.Children.Add(_status);
 
-		Button mark = new Button { Content = "Mark the spot", IsDefault = true, Padding = new Thickness(18.0, 8.0, 18.0, 8.0) };
-		mark.Click += (s, e) => Finish(LogoAction.Mark);
+		Button mark = new Button { Content = "Place logo", IsDefault = true, Padding = new Thickness(18.0, 8.0, 18.0, 8.0) };
+		mark.Click += (s, e) => Finish();
 		Button cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(16.0, 8.0, 16.0, 8.0) };
-		StackPanel left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-		if (guides > 0)
-		{
-			Button snap = new Button { Content = "Fit placed logo to guide", Padding = new Thickness(14.0, 8.0, 14.0, 8.0) };
-			snap.Click += (s, e) => Finish(LogoAction.Snap);
-			Button remove = new Button { Content = "Remove guides", Style = Theme.Get("Link"), Margin = new Thickness(8.0, 0.0, 0.0, 0.0) };
-			remove.Click += (s, e) => Finish(LogoAction.RemoveGuides);
-			left.Children.Add(snap);
-			left.Children.Add(remove);
-		}
+		StackPanel left = new StackPanel();
 
 		DockPanel root = new DockPanel();
-		Border header = Theme.Header("Place Logo", "Finds the client's logo, marks where it goes and opens Revit's decal tools.");
+		Border header = Theme.Header("Place Logo", "Finds the client's logo, builds it as a family and places it on the wall.");
 		DockPanel.SetDock(header, Dock.Top);
 		root.Children.Add(header);
 		Border footer = Theme.Footer(left, cancel, mark);
@@ -185,31 +161,27 @@ public class LogoWindow : Window
 		}
 	}
 
-	private void Finish(LogoAction action)
+	private void Finish()
 	{
-		if (action == LogoAction.Mark)
+		if (LogoPath == null)
 		{
-			if (LogoPath == null)
-			{
-				_status.Text = "Choose the logo image first.";
-				return;
-			}
-			if (_reception.IsChecked != true && _selected.IsChecked != true)
-			{
-				_status.Text = "Choose where the logo goes. To use your own walls, close this, select them, and open Place Logo again.";
-				return;
-			}
-			double? w = _parse(_widthBox.Text);
-			double? h = _parse(_heightBox.Text);
-			if (!(w > 0.0) || !(h > 0.0))
-			{
-				_status.Text = "Enter the width and height as lengths, like 120 cm.";
-				return;
-			}
-			LogoWidth = w.Value;
-			CenterHeight = h.Value;
+			_status.Text = "Choose the logo image first.";
+			return;
 		}
-		Action = action;
+		if (_reception.IsChecked != true && _selected.IsChecked != true)
+		{
+			_status.Text = "Choose where the logo goes. To use your own walls, close this, select them, and open Place Logo again.";
+			return;
+		}
+		double? w = _parse(_widthBox.Text);
+		double? h = _parse(_heightBox.Text);
+		if (!(w > 0.0) || !(h > 0.0))
+		{
+			_status.Text = "Enter the width and height as lengths, like 120 cm.";
+			return;
+		}
+		LogoWidth = w.Value;
+		CenterHeight = h.Value;
 		DialogResult = true;
 		Close();
 	}
