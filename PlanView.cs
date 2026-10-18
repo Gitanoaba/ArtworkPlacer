@@ -71,6 +71,10 @@ public class PlanView : FrameworkElement
 	// Una pieza de artwork arrastrada a lo largo de su muro: la pieza y su nuevo centro (coordenadas del modelo)
 	public event Action<PlanMarker, Point> MarkerMoved;
 
+	public event Action<PlanFace> AddClicked;
+
+	private PlanFace _hoverAdd;
+
 	private PlanMarker _dragMarker;
 
 	private Point _dragOrigin;
@@ -205,11 +209,19 @@ public class PlanView : FrameworkElement
 		{
 			DrawMarker(dc, m);
 		}
+		foreach (PlanFace f in _faces.Where((PlanFace f) => f.LevelId == _level.Id && f.AddAt.HasValue))
+		{
+			DrawAdd(dc, f);
+		}
 		foreach (PlanRoom room in _level.Rooms)
 		{
 			DrawLabel(dc, room, dpi);
 		}
-		if (_hoverMarker != null)
+		if (_hoverAdd != null)
+		{
+			DrawTip(dc, "Add a piece", "Adds one more piece from this room's zone on this wall.", dpi);
+		}
+		else if (_hoverMarker != null)
 		{
 			DrawTip(dc, _hoverMarker.Label, MarkerHint(_hoverMarker), dpi);
 		}
@@ -234,6 +246,33 @@ public class PlanView : FrameworkElement
 		dc.DrawLine(pen, ToScreen(a), ToScreen(b));
 	}
 
+	// "+" en una línea azul donde cabe otra pieza: un círculo chico, un poco hacia adentro del room
+	private Point AddCenter(PlanFace f)
+	{
+		Vector n = f.Normal;
+		n.Normalize();
+		return ToScreen(f.AddAt.Value) + new Vector(n.X, -n.Y) * 14.0;
+	}
+
+	private void DrawAdd(DrawingContext dc, PlanFace f)
+	{
+		Point c = AddCenter(f);
+		bool hot = f == _hoverAdd;
+		dc.DrawEllipse(hot ? Theme.Accent : Theme.Panel, new Pen(Theme.Accent, 1.5), c, 9.0, 9.0);
+		Pen plus = new Pen(hot ? Theme.Panel : Theme.Accent, 2.0);
+		dc.DrawLine(plus, c + new Vector(-4.5, 0.0), c + new Vector(4.5, 0.0));
+		dc.DrawLine(plus, c + new Vector(0.0, -4.5), c + new Vector(0.0, 4.5));
+	}
+
+	private PlanFace AddAt(Point screen)
+	{
+		if (_level == null)
+		{
+			return null;
+		}
+		return _faces.Where((PlanFace f) => f.LevelId == _level.Id && f.AddAt.HasValue).FirstOrDefault((PlanFace f) => (AddCenter(f) - screen).Length <= 11.0);
+	}
+
 	private RoomUse UseOf(long roomId)
 	{
 		return _level?.Rooms.FirstOrDefault((PlanRoom r) => r.Id == roomId)?.Use ?? RoomUse.None;
@@ -249,7 +288,7 @@ public class PlanView : FrameworkElement
 		{
 			return m.CanMove ? "Click to move it to the next wall, or click a dashed wall." : "Only wall that fits";
 		}
-		return "Drag along the wall to move it, or click to leave it out";
+		return m.Manual ? "Added by hand. Drag along the wall to move it, or click to remove it" : "Drag along the wall to move it, or click to leave it out";
 	}
 
 	private string FaceHint(PlanFace f)
@@ -523,6 +562,17 @@ public class PlanView : FrameworkElement
 				return;
 			}
 		}
+		PlanFace add = AddAt(_mouse);
+		if (add != _hoverAdd)
+		{
+			_hoverAdd = add;
+			InvalidateVisual();
+		}
+		if (add != null)
+		{
+			Cursor = Cursors.Hand;
+			return;
+		}
 		PlanMarker marker = MarkerAt(_mouse);
 		PlanFace face = (marker == null) ? FaceAt(_mouse) : null;
 		PlanRoom room = (marker == null && face == null) ? RoomAt(_mouse) : null;
@@ -573,6 +623,12 @@ public class PlanView : FrameworkElement
 		}
 		Point p = e.GetPosition(this);
 		bool add = (Keyboard.Modifiers & (ModifierKeys.Shift | ModifierKeys.Control)) != 0;
+		PlanFace plus = AddAt(p);
+		if (plus != null)
+		{
+			AddClicked?.Invoke(plus);
+			return;
+		}
 		PlanMarker marker = MarkerAt(p);
 		if (marker != null)
 		{

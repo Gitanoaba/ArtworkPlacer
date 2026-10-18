@@ -188,6 +188,7 @@ public class StudioWindow : Window
 		_plan.BackgroundClicked += () => Select(null, add: false);
 		_plan.MarkerClicked += OnMarker;
 		_plan.MarkerMoved += (m, center) => Run(() => _host.MovePiece(m.Key, center));
+		_plan.AddClicked += (face) => Run(() => _host.AddPiece(face.Key));
 		_plan.FaceClicked += (face) => Run(() => _host.ChangeFace(face.Key));
 		_suggestButton.Click += (s, e) => Run(() => _host.Suggest());
 		_collectionBox.SelectionChanged += (s, e) =>
@@ -996,6 +997,11 @@ public class StudioWindow : Window
 		if (m.Use == RoomUse.Tv && !m.Skipped)
 		{
 			Run(() => _host.MoveTv(m.RoomId));
+			return;
+		}
+		if (m.Manual)
+		{
+			Run(() => _host.RemovePiece(m.Key));
 			return;
 		}
 		if (!_skipped.Remove(m.Key))

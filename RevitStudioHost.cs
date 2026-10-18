@@ -47,6 +47,8 @@ internal class RevitStudioHost : IStudioHost
 		public WallPlacer Placer;
 
 		public int Index;
+
+		public bool Manual;
 	}
 
 	private const double MinFreeFace = 2.0;
@@ -157,6 +159,11 @@ internal class RevitStudioHost : IStudioHost
 
 	// Posiciones elegidas arrastrando: (cara, n.º de pieza en esa cara) → centro a lo largo del muro
 	private readonly Dictionary<Tuple<int, int>, double> _pins = new Dictionary<Tuple<int, int>, double>();
+
+	// Piezas agregadas a mano con "+", por cara; sobreviven a los cambios de opciones
+	private readonly Dictionary<int, List<WallPlacer.Piece>> _manual = new Dictionary<int, List<WallPlacer.Piece>>();
+
+	private readonly Dictionary<string, double> _placerGap = new Dictionary<string, double>();
 
 	private const string ZoneKey = "zone:";
 
@@ -707,6 +714,7 @@ internal class RevitStudioHost : IStudioHost
 		}
 		Activate(symbols);
 		placer = (symbols.Count == 0) ? null : new WallPlacer(_doc, symbols, _req.ArtHeight, _req.ArtAlign, _req.Clearance, gap, max, SideMode.Auto, Fmt);
+		_placerGap[collection] = gap;
 		_collectionSymbols[collection] = symbols;
 		_placers[collection] = placer;
 		return placer;
@@ -872,8 +880,15 @@ internal class RevitStudioHost : IStudioHost
 				faces.ForEach((FaceState f) => _faceProblems[f.Key] = missing);
 				continue;
 			}
+			double gap = GapOf(group.Key);
 			FaceRanges ranges = new FaceRanges();
-			faces.ForEach((FaceState f) => ranges.Add(wall.Id, f.Face.Sign, f.Face.U0, f.Face.U1));
+			foreach (FaceState f in faces)
+			{
+				foreach (Tuple<double, double> free in FreeOf(f, ManualOn(f).Select((WallPlacer.Piece m) => Tuple.Create(m.Center - m.Width / 2.0 - gap, m.Center + m.Width / 2.0 + gap))))
+				{
+					ranges.Add(wall.Id, f.Face.Sign, free.Item1, free.Item2);
+				}
+			}
 			placer.Ranges = ranges;
 			List<string> notes = new List<string>();
 			foreach (WallPlacer.Piece p in placer.Plan(wall, ranges.Signs(wall.Id), notes))
@@ -886,6 +901,13 @@ internal class RevitStudioHost : IStudioHost
 					MoveTo(plan, pinned);
 				}
 				_artPlans.Add(plan);
+			}
+			foreach (FaceState f in faces)
+			{
+				foreach (WallPlacer.Piece m in ManualOn(f))
+				{
+					_artPlans.Add(new ArtPlan { Key = ++_nextKey, Face = f, Piece = m, Placer = placer, Index = -1, Manual = true });
+				}
 			}
 			string why = Sentence(notes.FirstOrDefault((string n) => n.StartsWith("free")) ?? notes.FirstOrDefault() ?? "No free space here for the artwork");
 			foreach (FaceState f in faces.Where((FaceState f) => !_artPlans.Any((ArtPlan a) => a.Face == f)))
@@ -911,7 +933,112 @@ internal class RevitStudioHost : IStudioHost
 		double hi = a.Face.Face.U1 - half;
 		u = (lo <= hi) ? Math.Max(lo, Math.Min(hi, u)) : a.Piece.Center;
 		MoveTo(a, u);
-		_pins[Tuple.Create(a.Face.Key, a.Index)] = u;
+		if (!a.Manual)
+		{
+			_pins[Tuple.Create(a.Face.Key, a.Index)] = u;
+		}
+		return State(null);
+	}
+
+	private List<WallPlacer.Piece> ManualOn(FaceState f)
+	{
+		return (f.On && _manual.TryGetValue(f.Key, out var list)) ? list : new List<WallPlacer.Piece>();
+	}
+
+	private double GapOf(string collection)
+	{
+		return _placerGap.TryGetValue(collection, out var g) ? g : (_req?.Gap ?? 0.0);
+	}
+
+	// Tramos libres de la cara, sin los intervalos dados y con la separación a las puntas
+	private List<Tuple<double, double>> FreeOf(FaceState f, IEnumerable<Tuple<double, double>> taken)
+	{
+		List<Tuple<double, double>> free = new List<Tuple<double, double>>();
+		double at = f.Face.U0;
+		foreach (Tuple<double, double> t in taken.OrderBy((Tuple<double, double> t) => t.Item1))
+		{
+			if (t.Item1 > at)
+			{
+				free.Add(Tuple.Create(at, Math.Min(t.Item1, f.Face.U1)));
+			}
+			at = Math.Max(at, t.Item2);
+		}
+		if (f.Face.U1 > at)
+		{
+			free.Add(Tuple.Create(at, f.Face.U1));
+		}
+		return free.Where((Tuple<double, double> x) => x.Item2 - x.Item1 > 0.01).ToList();
+	}
+
+	// Dónde cabe una pieza más en una cara con artwork (null si no cabe): el centro del tramo libre más largo
+	private Tuple<double, double> RoomForOneMore(FaceState f)
+	{
+		if (!f.On || f.TvWall)
+		{
+			return null;
+		}
+		string key = CollectionOf(f.RoomId);
+		WallPlacer placer = (key.Length == 0) ? ((_artSymbols.Count > 0) ? _wallPlacer : null) : (_placers.TryGetValue(key, out var p) ? p : null);
+		double min = placer?.MinWidth ?? -1.0;
+		if (min <= 0.0)
+		{
+			return null;
+		}
+		double gap = GapOf(key);
+		double clear = _req?.Clearance ?? 0.0;
+		IEnumerable<Tuple<double, double>> taken = _artPlans.Where((ArtPlan a) => a.Face == f)
+			.Select((ArtPlan a) => Tuple.Create(a.Piece.Center - a.Piece.Width / 2.0 - gap, a.Piece.Center + a.Piece.Width / 2.0 + gap))
+			.Concat(new[] { Tuple.Create(f.Face.U0 - 1.0, f.Face.U0 + clear), Tuple.Create(f.Face.U1 - clear, f.Face.U1 + 1.0) });
+		return FreeOf(f, taken).Where((Tuple<double, double> x) => x.Item2 - x.Item1 >= min).OrderByDescending((Tuple<double, double> x) => x.Item2 - x.Item1).FirstOrDefault();
+	}
+
+	public PreviewResult AddPiece(int faceKey)
+	{
+		FaceState f = _faces.FirstOrDefault((FaceState x) => x.Key == faceKey);
+		Tuple<double, double> room = (f == null) ? null : RoomForOneMore(f);
+		if (room == null)
+		{
+			return State("There's no room for another piece on this wall.");
+		}
+		string key = CollectionOf(f.RoomId);
+		WallPlacer.Piece added = null;
+		List<string> notes = new List<string>();
+		InTransaction(delegate
+		{
+			WallPlacer placer = PlacerFor(key);
+			if (placer == null)
+			{
+				return;
+			}
+			FaceRanges ranges = new FaceRanges();
+			ranges.Add(f.Face.Wall.Id, f.Face.Sign, room.Item1, room.Item2);
+			placer.Ranges = ranges;
+			double mid = (room.Item1 + room.Item2) / 2.0;
+			added = placer.Plan(f.Face.Wall, new List<int> { f.Face.Sign }, notes).OrderBy((WallPlacer.Piece p) => Math.Abs(p.Center - mid)).FirstOrDefault();
+			if (added != null)
+			{
+				if (!_manual.TryGetValue(f.Key, out var list))
+				{
+					list = (_manual[f.Key] = new List<WallPlacer.Piece>());
+				}
+				list.Add(added);
+				ReplanWall(f.Face.Wall);
+			}
+		});
+		return State((added == null) ? Sentence(notes.FirstOrDefault() ?? "No piece fits there") + "." : null);
+	}
+
+	public PreviewResult RemovePiece(int markerKey)
+	{
+		ArtPlan a = _artPlans.FirstOrDefault((ArtPlan x) => x.Key == markerKey && x.Manual);
+		if (a != null && _manual.TryGetValue(a.Face.Key, out var list))
+		{
+			list.Remove(a.Piece);
+			InTransaction(delegate
+			{
+				ReplanWall(a.Piece.Wall);
+			});
+		}
 		return State(null);
 	}
 
@@ -1015,6 +1142,7 @@ internal class RevitStudioHost : IStudioHost
 		f.On = !f.On;
 		f.Suggested = false;
 		_pins.Keys.Where((Tuple<int, int> k) => k.Item1 == f.Key).ToList().ForEach((Tuple<int, int> k) => _pins.Remove(k));
+		_manual.Remove(f.Key);
 		InTransaction(delegate
 		{
 			ReplanWall(f.Face.Wall);
@@ -1183,8 +1311,21 @@ internal class RevitStudioHost : IStudioHost
 			TvWall = f.TvWall,
 			On = f.On || f.TvWall,
 			Suggested = f.Suggested,
-			Problem = _faceProblems.TryGetValue(f.Key, out var p) ? p : null
+			Problem = _faceProblems.TryGetValue(f.Key, out var p) ? p : null,
+			AddAt = AddPoint(f)
 		};
+	}
+
+	private Point? AddPoint(FaceState f)
+	{
+		Tuple<double, double> room = RoomForOneMore(f);
+		if (room == null)
+		{
+			return null;
+		}
+		Line line = (Line)((LocationCurve)f.Face.Wall.Location).Curve;
+		XYZ at = line.GetEndPoint(0) + line.Direction * ((room.Item1 + room.Item2) / 2.0) + f.Face.Normal * (f.Face.Wall.Width / 2.0);
+		return new Point(at.X, at.Y);
 	}
 
 	private static string Sentence(string s)
@@ -1232,7 +1373,8 @@ internal class RevitStudioHost : IStudioHost
 			Along = V(a.Piece.Along),
 			Normal = V(a.Piece.Normal),
 			Width = a.Piece.Width,
-			Label = TypeName(a.Piece.Symbol)
+			Label = TypeName(a.Piece.Symbol),
+			Manual = a.Manual
 		};
 	}
 

@@ -259,6 +259,9 @@ internal class WallPlacer : WallFaces
 		return list;
 	}
 
+	// Ancho de la pieza más angosta ya medida (-1 si no hay ninguna medida)
+	public double MinWidth => _symbols.Select((FamilySymbol s) => _widths.TryGetValue(s.Id, out var w) ? w : -1.0).Where((double w) => w > 0.0).DefaultIfEmpty(-1.0).Min();
+
 	public FamilyInstance PlacePiece(Piece piece, out string reason)
 	{
 		WallGeom g = Analyze(piece.Wall, RefHeight, out var error);

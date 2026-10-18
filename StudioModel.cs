@@ -95,6 +95,8 @@ public class PlanMarker
 	public bool Skipped;
 
 	public bool CanMove;
+
+	public bool Manual;
 }
 
 public class PlanFace
@@ -128,6 +130,8 @@ public class PlanFace
 	public bool Suggested;
 
 	public string Problem;
+
+	public Point? AddAt;
 }
 
 public class StudioRequest
@@ -213,6 +217,10 @@ public interface IStudioHost
 	PreviewResult SetRoomZone(long roomId, ArtZone? zone);
 
 	PreviewResult MovePiece(int markerKey, Point center);
+
+	PreviewResult AddPiece(int faceKey);
+
+	PreviewResult RemovePiece(int markerKey);
 }
 
 public class StudioSettings
