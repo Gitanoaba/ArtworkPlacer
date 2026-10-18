@@ -78,6 +78,86 @@ internal static class ClientBoards
 
 	public static List<ClientBoard> Read(Document doc, HashSet<long> placeable)
 	{
+		return Read(doc, placeable, out _);
+	}
+
+	// Marca y zona desde el nombre: "IWG_Regus_ArtWork_Kitchen" → tablero "IWG_Regus", zona Kitchen
+	private static Tuple<string, ArtZone> FromName(FamilySymbol sym)
+	{
+		foreach (string name in new[] { sym.FamilyName, sym.Name })
+		{
+			int at = (name ?? "").IndexOf("_artwork_", StringComparison.OrdinalIgnoreCase);
+			if (at <= 0)
+			{
+				continue;
+			}
+			ArtZone zone = ZoneOf(name.Substring(at + 9));
+			if (zone != ArtZone.None)
+			{
+				return Tuple.Create(name.Substring(0, at).Trim(), zone);
+			}
+		}
+		return null;
+	}
+
+	// El nombre del tipo manda; la posición en la sección es el respaldo y da el orden de rotación.
+	// mismatches: piezas cuyo nombre dice otra cosa que el lugar donde están en la sección.
+	public static List<ClientBoard> Read(Document doc, HashSet<long> placeable, out List<string> mismatches)
+	{
+		mismatches = new List<string>();
+		List<ClientBoard> fromSections = ReadSections(doc, placeable);
+		Dictionary<long, Tuple<string, ArtZone, int>> bySection = new Dictionary<long, Tuple<string, ArtZone, int>>();
+		int order = 0;
+		foreach (ClientBoard b in fromSections)
+		{
+			foreach (KeyValuePair<ArtZone, List<long>> z in b.Zones)
+			{
+				foreach (long id in z.Value)
+				{
+					bySection[id] = Tuple.Create(b.Name, z.Key, order++);
+				}
+			}
+		}
+		Dictionary<string, ClientBoard> boards = new Dictionary<string, ClientBoard>(StringComparer.OrdinalIgnoreCase);
+		List<Tuple<string, ArtZone, int, string, long>> assigned = new List<Tuple<string, ArtZone, int, string, long>>();
+		foreach (long id in placeable)
+		{
+			if (!(doc.GetElement(new ElementId(id)) is FamilySymbol sym))
+			{
+				continue;
+			}
+			Tuple<string, ArtZone> named = FromName(sym);
+			bySection.TryGetValue(id, out var placed);
+			if (named == null && placed == null)
+			{
+				continue;
+			}
+			if (named != null && placed != null && (!named.Item1.Equals(placed.Item1, StringComparison.OrdinalIgnoreCase) || named.Item2 != placed.Item2))
+			{
+				mismatches.Add($"{sym.FamilyName} : {sym.Name} is under {placed.Item2} in {placed.Item1}");
+			}
+			string board = named?.Item1 ?? placed.Item1;
+			ArtZone zone = named?.Item2 ?? placed.Item2;
+			assigned.Add(Tuple.Create(board, zone, placed?.Item3 ?? int.MaxValue, sym.FamilyName + " " + sym.Name, id));
+		}
+		// Orden: el de la sección; las piezas que no están en la sección, al final por nombre
+		foreach (var a in assigned.OrderBy(a => a.Item3).ThenBy(a => a.Item4, StringComparer.OrdinalIgnoreCase))
+		{
+			if (!boards.TryGetValue(a.Item1, out var b))
+			{
+				b = (boards[a.Item1] = new ClientBoard { Name = a.Item1 });
+			}
+			if (!b.Zones.TryGetValue(a.Item2, out var ids))
+			{
+				ids = (b.Zones[a.Item2] = new List<long>());
+			}
+			ids.Add(a.Item5);
+		}
+		return boards.Values.OrderBy((ClientBoard b) => b.Name).ToList();
+	}
+
+	private static List<ClientBoard> ReadSections(Document doc, HashSet<long> placeable)
+	{
 		List<ClientBoard> boards = new List<ClientBoard>();
 		foreach (ViewSection view in new FilteredElementCollector(doc).OfClass(typeof(ViewSection)).Cast<ViewSection>()
 			.Where((ViewSection v) => !v.IsTemplate && PlaceArtworkCommand.LooksLikeArtwork(v.Name)))

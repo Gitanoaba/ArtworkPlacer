@@ -119,7 +119,25 @@ internal class RevitStudioHost : IStudioHost
 
 	private static readonly double SmallSpace = UnitUtils.ConvertToInternalUnits(40.0, UnitTypeId.SquareMeters);
 
-	public string StartNote => (_notRebuilt.Count == 0) ? null : $"{_notRebuilt.Count} room(s) aren't enclosed in Revit and couldn't be rebuilt from the walls: {string.Join(", ", _notRebuilt.Take(5))}{((_notRebuilt.Count > 5) ? "…" : "")}. Fix them in Revit for better results.";
+	private List<string> _boardMismatches = new List<string>();
+
+	// Avisos al abrir: rooms que no se pudieron reconstruir y piezas cuyo nombre no calza con su lugar en el tablero
+	public string StartNote
+	{
+		get
+		{
+			List<string> notes = new List<string>();
+			if (_notRebuilt.Count > 0)
+			{
+				notes.Add($"{_notRebuilt.Count} room(s) aren't enclosed in Revit and couldn't be rebuilt from the walls: {string.Join(", ", _notRebuilt.Take(5))}{((_notRebuilt.Count > 5) ? "…" : "")}. Fix them in Revit for better results.");
+			}
+			if (_boardMismatches.Count > 0)
+			{
+				notes.Add($"{_boardMismatches.Count} artwork piece(s) sit in a different zone than their name says; the name wins: {string.Join("; ", _boardMismatches.Take(3))}{((_boardMismatches.Count > 3) ? "…" : "")}.");
+			}
+			return (notes.Count == 0) ? null : string.Join(" ", notes);
+		}
+	}
 
 	public List<PlanLevel> Levels { get; }
 
@@ -496,7 +514,7 @@ internal class RevitStudioHost : IStudioHost
 		Func<FamilySymbol, bool> none = (FamilySymbol s) => false;
 		List<TypeItem> all = PlaceArtworkCommand.CollectTypes(_doc, none, new HashSet<long>());
 		Collections = PlaceArtworkCommand.CollectCollections(_doc, all);
-		Boards = ClientBoards.Read(_doc, new HashSet<long>(all.Select((TypeItem t) => t.Id)));
+		Boards = ClientBoards.Read(_doc, new HashSet<long>(all.Select((TypeItem t) => t.Id)), out _boardMismatches);
 		HashSet<long> inSections = new HashSet<long>(Collections.SelectMany((ArtCollection c) => c.Ids));
 		List<TypeItem> tv = all.Where((TypeItem t) => PlaceTvCommand.LooksLikeTv(t.Label)).ToList();
 		List<TypeItem> art = all.Where((TypeItem t) => (PlaceArtworkCommand.LooksLikeArtwork(t.Label) || inSections.Contains(t.Id)) && !tv.Contains(t)).ToList();
