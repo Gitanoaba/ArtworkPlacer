@@ -174,7 +174,7 @@ public class LogoCommand : IExternalCommand
 	}
 
 	// Alto / ancho de la imagen, para que el logo tenga su proporción
-	private static double Aspect(string path)
+	internal static double Aspect(string path)
 	{
 		try
 		{

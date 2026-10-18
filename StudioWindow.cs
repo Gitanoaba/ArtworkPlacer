@@ -47,6 +47,8 @@ public class StudioWindow : Window
 
 	private readonly CheckBox _artInOffices = new CheckBox { Content = "Allow artwork in private offices" };
 
+	private readonly CheckBox _placeLogo = new CheckBox { Content = "Place the client logo" };
+
 	private readonly ComboBox _collectionBox = new ComboBox();
 
 	private const string TickedTypes = "Ticked types below";
@@ -128,6 +130,7 @@ public class StudioWindow : Window
 		_autoSize.IsChecked = settings.TvAutoSize;
 		_drywallOnly.IsChecked = settings.DrywallOnly;
 		_artInOffices.IsChecked = settings.ArtInOffices;
+		_placeLogo.IsChecked = settings.PlaceLogo;
 		foreach (TypeItem t in host.ArtTypes)
 		{
 			t.IsChecked = (settings.ArtChecked.Count > 0) ? settings.ArtChecked.Contains(t.Id) : t.IsChecked;
@@ -248,7 +251,7 @@ public class StudioWindow : Window
 			RefreshSelection();
 			Later();
 		};
-		foreach (CheckBox box in new[] { _autoSize, _drywallOnly, _artInOffices })
+		foreach (CheckBox box in new[] { _autoSize, _drywallOnly, _artInOffices, _placeLogo })
 		{
 			box.Checked += (s, e) => Later();
 			box.Unchecked += (s, e) => Later();
@@ -377,6 +380,16 @@ public class StudioWindow : Window
 		officeNote.FontSize = 12.0;
 		officeNote.Margin = new Thickness(24.0, 2.0, 0.0, 0.0);
 		stack.Children.Add(officeNote);
+		// Solo con el JSON del diseño se sabe qué muro se ve desde la entrada
+		if (_host.HasLogoWall)
+		{
+			_placeLogo.Margin = new Thickness(0.0, 12.0, 0.0, 0.0);
+			stack.Children.Add(_placeLogo);
+			TextBlock logoNote = Theme.Note("On the pink Logo wall, the one you see from the main entrance. Uses the client image like Place Logo, 120 cm wide. Untick to leave that wall free for artwork.");
+			logoNote.FontSize = 12.0;
+			logoNote.Margin = new Thickness(24.0, 2.0, 0.0, 0.0);
+			stack.Children.Add(logoNote);
+		}
 		stack.Children.Add(Section("Artwork"));
 		if (_host.Boards.Count > 0)
 		{
@@ -1009,6 +1022,7 @@ public class StudioWindow : Window
 			TvAutoSize = _autoSize.IsChecked == true,
 			DrywallOnly = _drywallOnly.IsChecked == true,
 			ArtInOffices = _artInOffices.IsChecked == true,
+			PlaceLogo = _host.HasLogoWall && _placeLogo.IsChecked == true,
 			RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection),
 			Client = SelectedClient?.Name,
 			RoomZones = AllRooms.Where((PlanRoom r) => r.Zone.HasValue).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Zone.Value)
@@ -1103,6 +1117,7 @@ public class StudioWindow : Window
 		_settings.TvAutoSize = _autoSize.IsChecked == true;
 		_settings.DrywallOnly = _drywallOnly.IsChecked == true;
 		_settings.ArtInOffices = _artInOffices.IsChecked == true;
+		_settings.PlaceLogo = _placeLogo.IsChecked == true;
 		_settings.Collection = (_collectionBox.SelectedIndex > 0) ? _host.Collections[_collectionBox.SelectedIndex - 1].Name : null;
 		_settings.RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection);
 		_settings.Client = SelectedClient?.Name;

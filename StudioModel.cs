@@ -150,6 +150,8 @@ public class StudioRequest
 
 	public bool ArtInOffices;
 
+	public bool PlaceLogo;
+
 	public Dictionary<long, string> RoomCollections = new Dictionary<long, string>();
 
 	public string Client;
@@ -208,6 +210,8 @@ public interface IStudioHost
 
 	string DesignFolder { get; }
 
+	bool HasLogoWall { get; }
+
 	Thumb Thumb(long typeId);
 
 	double? ParseLength(string text);
@@ -260,6 +264,8 @@ public class StudioSettings
 	public bool DrywallOnly = true;
 
 	public bool ArtInOffices;
+
+	public bool PlaceLogo = true;
 
 	public string Collection;
 

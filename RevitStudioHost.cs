@@ -161,6 +161,11 @@ internal class RevitStudioHost : IStudioHost
 
 	private FaceState _logoFace;
 
+	// El muro del logo, si el usuario quiere el logo (si no, queda libre para arte)
+	private FaceState LogoFace => (_req != null && !_req.PlaceLogo) ? null : _logoFace;
+
+	public bool HasLogoWall => _logoFace != null;
+
 	// El muro del logo (el que se ve desde la entrada principal), para Place Logo
 	public LogoTarget LogoTarget => (_logoFace == null) ? null : new LogoTarget
 	{
@@ -1539,7 +1544,7 @@ internal class RevitStudioHost : IStudioHost
 	{
 		List<FaceState> picks = new List<FaceState>();
 		foreach (IGrouping<long, FaceState> room in from f in _faces
-			where f.RoomId != 0 && Allowed(f) && !IsTv(f.RoomId) && f != _logoFace
+			where f.RoomId != 0 && Allowed(f) && !IsTv(f.RoomId) && f != LogoFace
 			group f by f.RoomId)
 		{
 			string name = NameOf(room.Key);
@@ -1555,7 +1560,7 @@ internal class RevitStudioHost : IStudioHost
 		}
 		double freeMin = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
 		double coreMin = UnitUtils.ConvertToInternalUnits(1.5, UnitTypeId.Meters);
-		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && f != _logoFace && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? coreMin : freeMin)));
+		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && f != LogoFace && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? coreMin : freeMin)));
 		return picks;
 	}
 
@@ -1567,7 +1572,7 @@ internal class RevitStudioHost : IStudioHost
 		double m15 = UnitUtils.ConvertToInternalUnits(1.5, UnitTypeId.Meters);
 		double m3 = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
 		foreach (IGrouping<long, FaceState> room in from f in _faces
-			where f.RoomId != 0 && Allowed(f) && !f.TvWall && f != _logoFace
+			where f.RoomId != 0 && Allowed(f) && !f.TvWall && f != LogoFace
 			group f by f.RoomId)
 		{
 			if (room.Any((FaceState f) => f.On) || WallRules.IsService(NameOf(room.Key)))
@@ -1588,11 +1593,11 @@ internal class RevitStudioHost : IStudioHost
 				break;
 			case ArtZone.Reception:
 				// El muro del logo ya quedó afuera; sin él, se reserva el más largo
-				picks.AddRange(longest.Skip((_logoFace == null && longest.Count > 1) ? 1 : 0).Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(1));
+				picks.AddRange(longest.Skip((LogoFace == null && longest.Count > 1) ? 1 : 0).Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(1));
 				break;
 			}
 		}
-		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && f != _logoFace && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? m15 : m3)));
+		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && f != LogoFace && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? m15 : m3)));
 		return picks;
 	}
 
@@ -1643,7 +1648,7 @@ internal class RevitStudioHost : IStudioHost
 			Reason = Why(f),
 			Core = f.Core,
 			TvWall = f.TvWall,
-			Logo = f == _logoFace,
+			Logo = f == LogoFace,
 			On = f.On || f.TvWall,
 			Suggested = f.Suggested,
 			Problem = _faceProblems.TryGetValue(f.Key, out var p) ? p : null,
@@ -1719,6 +1724,9 @@ internal class RevitStudioHost : IStudioHost
 		List<string> notes = new List<string>();
 		int tvs = 0;
 		int arts = 0;
+		int logos = 0;
+		// El logo del cliente: familia y material antes de la transacción, como Place Logo
+		FamilySymbol logo = (LogoFace != null) ? BuildLogo(notes, out var logoReady) : null;
 		TransactionStatus status;
 		using (Transaction t = new Transaction(_doc, "Room Studio: place TVs and artwork"))
 		{
@@ -1734,6 +1742,10 @@ internal class RevitStudioHost : IStudioHost
 				string label = (a.Face.RoomId != 0) ? NameOf(a.Face.RoomId) : PlaceArtworkCommand.WallLabel(a.Piece.Wall);
 				Try(label, () => a.Placer.PlacePiece(a.Piece, out var reason) ?? Fail(reason), ref arts);
 			}
+			if (logo != null)
+			{
+				Try("Logo", () => PlaceLogo(logo), ref logos);
+			}
 			status = t.Commit();
 		}
 		// Si Revit rechazó la transacción, no quedó nada en el modelo
@@ -1748,7 +1760,7 @@ internal class RevitStudioHost : IStudioHost
 		}
 		TaskDialog dialog = new TaskDialog("Room Studio")
 		{
-			MainInstruction = $"Placed {tvs} TV(s) and {arts} artwork piece(s).",
+			MainInstruction = $"Placed {tvs} TV(s) and {arts} artwork piece(s)" + ((logos > 0) ? " and the logo." : "."),
 			MainContent = (notes.Count == 0) ? "Everything from the plan is in the model and selected, so you can review it." : $"{notes.Count} item(s) couldn't be placed (see details). The rest are selected.",
 			ExpandedContent = string.Join("\n", notes)
 		};
@@ -1771,6 +1783,71 @@ internal class RevitStudioHost : IStudioHost
 				notes.Add(label + ": " + ex.Message);
 			}
 		}
+	}
+
+	private static readonly double LogoWidth = UnitUtils.ConvertToInternalUnits(120.0, UnitTypeId.Centimeters);
+
+	// Arma la familia "Qbiq Logo" con la imagen del cliente; null si no hay imagen o ya hay un logo en el modelo
+	private FamilySymbol BuildLogo(List<string> notes, out bool ready)
+	{
+		ready = false;
+		string image = LogoPlacer.FindLogo(_uidoc.Application, _doc);
+		if (image == null)
+		{
+			notes.Add("Logo: no client logo image found (the Design ID folder or a *_client image). Use Place Logo to pick one.");
+			return null;
+		}
+		double width = Math.Min(LogoWidth, (_logoFace.Face.U1 - _logoFace.Face.U0) * 0.8);
+		double height = width * LogoCommand.Aspect(image);
+		try
+		{
+			FamilySymbol symbol = LogoFamily.Build(_doc, _uidoc.Application.Application, width, height);
+			if (symbol == null)
+			{
+				throw new InvalidOperationException("the logo family didn't load");
+			}
+			using (Transaction t = new Transaction(_doc, "Room Studio: logo material"))
+			{
+				t.Start();
+				LogoFamily.Paint(_doc, _uidoc.Application.Application, symbol, image, width, height);
+				t.Commit();
+			}
+			bool existing = new FilteredElementCollector(_doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().Any((FamilyInstance fi) => fi.Symbol.Family.Id == symbol.Family.Id);
+			if (existing)
+			{
+				notes.Add("Logo: the model already has one, so it was updated with the client image instead of adding another.");
+				return null;
+			}
+			ready = true;
+			return symbol;
+		}
+		catch (Exception ex)
+		{
+			notes.Add("Logo: couldn't build it: " + ex.Message);
+			return null;
+		}
+	}
+
+	// Una pieza del logo centrada en su cara, a 1,50 m al centro
+	private FamilyInstance PlaceLogo(FamilySymbol symbol)
+	{
+		if (!symbol.IsActive)
+		{
+			symbol.Activate();
+			_doc.Regenerate();
+		}
+		FaceState f = _logoFace;
+		WallPlacer placer = new WallPlacer(_doc, new List<FamilySymbol> { symbol }, UnitUtils.ConvertToInternalUnits(150.0, UnitTypeId.Centimeters), HeightAlign.Center, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters), 0.0, 1, SideMode.Auto, Fmt);
+		FaceRanges ranges = new FaceRanges();
+		ranges.Add(f.Face.Wall.Id, f.Face.Sign, f.Face.U0, f.Face.U1);
+		placer.Ranges = ranges;
+		List<string> why = new List<string>();
+		WallPlacer.Piece piece = placer.Plan(f.Face.Wall, new List<int> { f.Face.Sign }, why).FirstOrDefault();
+		if (piece == null)
+		{
+			return Fail(why.FirstOrDefault() ?? "no free space on the logo wall");
+		}
+		return placer.PlacePiece(piece, out var reason) ?? Fail(reason);
 	}
 
 	private static FamilyInstance Fail(string reason)
