@@ -70,6 +70,12 @@ public class PlanLevel
 	public List<PlanWall> Walls = new List<PlanWall>();
 
 	public List<PlanDoor> Doors = new List<PlanDoor>();
+
+	public List<Point[]> Cores = new List<Point[]>();
+
+	public Point? Entrance;
+
+	public Vector EntranceOut;
 }
 
 public class PlanMarker
@@ -124,6 +130,8 @@ public class PlanFace
 	public bool Core;
 
 	public bool TvWall;
+
+	public bool Logo;
 
 	public bool On;
 
@@ -197,6 +205,8 @@ public interface IStudioHost
 	string StartNote { get; }
 
 	string LayoutNote { get; }
+
+	string DesignFolder { get; }
 
 	Thumb Thumb(long typeId);
 

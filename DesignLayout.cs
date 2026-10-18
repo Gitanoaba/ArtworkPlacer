@@ -39,6 +39,14 @@ public class DesignLayout
 
 	public List<Tuple<Point, Point>> Walls = new List<Tuple<Point, Point>>();
 
+	// El core del edificio (ascensores, escaleras, baños): no viene como room
+	public List<Point[]> Cores = new List<Point[]>();
+
+	// Puerta principal (sale del hall de ascensores) y su dirección según el JSON
+	public Point? Entrance;
+
+	public Vector EntranceDir;
+
 	private static readonly Regex Num = new Regex("-?\\d+(?:\\.\\d+)?(?:[eE][-+]?\\d+)?");
 
 	public static DesignLayout Read(string path)
@@ -52,6 +60,7 @@ public class DesignLayout
 		DesignLayout layout = new DesignLayout { File = path };
 		foreach (Dictionary<string, object> r in rooms.OfType<Dictionary<string, object>>())
 		{
+			// El JSON descargado usa space_type/subtype; el *_design_data.json de la carpeta del Design ID, room_type/room_subtype
 			if (Get(r, "is_filler") is bool filler && filler)
 			{
 				continue;
@@ -63,13 +72,43 @@ public class DesignLayout
 			}
 			layout.Rooms.Add(new LayoutRoom
 			{
-				Type = (Get(r, "space_type") as string) ?? "Room",
-				Subtype = Get(r, "subtype") as string,
+				Type = (Get(r, "space_type") as string) ?? (Get(r, "room_type") as string) ?? "Room",
+				Subtype = (Get(r, "subtype") as string) ?? (Get(r, "room_subtype") as string),
 				Polygon = poly
 			});
 		}
 		if (Get(root, "nfp_data") is Dictionary<string, object> nfp)
 		{
+			if (Get(nfp, "cores") is IEnumerable cores)
+			{
+				foreach (string wkt in cores.OfType<string>())
+				{
+					Point[] core = Polygon(wkt);
+					if (core != null && core.Length >= 3)
+					{
+						layout.Cores.Add(core);
+					}
+				}
+			}
+			if (Get(nfp, "doors") is IEnumerable doors)
+			{
+				Dictionary<string, object> main = doors.OfType<Dictionary<string, object>>().FirstOrDefault((Dictionary<string, object> d) => (Get(d, "type") as string) == "main");
+				Point[] at = (main == null) ? null : Polygon(Get(main, "pt") as string, "(");
+				Point? dir = (main == null) ? null : Pt(Get(main, "vec"));
+				if (at != null && at.Length == 1 && dir.HasValue)
+				{
+					layout.Entrance = at[0];
+					layout.EntranceDir = new Vector(dir.Value.X, dir.Value.Y);
+				}
+			}
+			if (!layout.Entrance.HasValue)
+			{
+				Point[] at = Polygon(Get(nfp, "main_entrance") as string, "(");
+				if (at != null && at.Length == 1)
+				{
+					layout.Entrance = at[0];
+				}
+			}
 			foreach (string key in new[] { "walls", "interior_walls" })
 			{
 				if (!(Get(nfp, key) is IEnumerable list))
@@ -84,6 +123,19 @@ public class DesignLayout
 					{
 						layout.Walls.Add(Axis(a.Value, b.Value));
 					}
+				}
+			}
+		}
+		// Muros del *_design_data.json: ejes x0,y0 → x1,y1
+		if (Get(root, "walls") is IEnumerable axes)
+		{
+			foreach (Dictionary<string, object> w in axes.OfType<Dictionary<string, object>>())
+			{
+				Point? a = Pt(new[] { Get(w, "x0"), Get(w, "y0") });
+				Point? b = Pt(new[] { Get(w, "x1"), Get(w, "y1") });
+				if (a.HasValue && b.HasValue)
+				{
+					layout.Walls.Add(Tuple.Create(a.Value, b.Value));
 				}
 			}
 		}
@@ -102,7 +154,7 @@ public class DesignLayout
 	private static Point? Pt(object o)
 	{
 		object[] a = (o as IEnumerable)?.Cast<object>().ToArray();
-		if (a == null || a.Length < 2)
+		if (a == null || a.Length < 2 || a[0] == null || a[1] == null)
 		{
 			return null;
 		}
@@ -119,14 +171,14 @@ public class DesignLayout
 			: Tuple.Create(new Point(cx, Math.Min(a.Y, b.Y)), new Point(cx, Math.Max(a.Y, b.Y)));
 	}
 
-	// "POLYGON ((x y, x y, …))": el anillo exterior
-	private static Point[] Polygon(string wkt)
+	// "POLYGON ((x y, x y, …))": el anillo exterior ("POINT (x y)" con open = "(")
+	private static Point[] Polygon(string wkt, string openWith = "((")
 	{
 		if (string.IsNullOrEmpty(wkt))
 		{
 			return null;
 		}
-		int open = wkt.IndexOf("((", StringComparison.Ordinal);
+		int open = wkt.IndexOf(openWith, StringComparison.Ordinal);
 		int close = (open < 0) ? -1 : wkt.IndexOf(')', open);
 		if (open < 0 || close < 0)
 		{
@@ -139,7 +191,7 @@ public class DesignLayout
 		{
 			pts.Add(new Point(n[i], n[i + 1]));
 		}
-		if (pts.Count > 1 && (pts[0] - pts[pts.Count - 1]).Length < 0.01)
+		if (pts.Count > 2 && (pts[0] - pts[pts.Count - 1]).Length < 0.01)
 		{
 			pts.RemoveAt(pts.Count - 1);
 		}
@@ -159,6 +211,14 @@ public class LayoutFit
 	public Vector Offset;
 
 	public double Score;
+
+	// Una dirección del JSON en el modelo (sin desplazamiento)
+	public Vector ApplyDir(Vector v)
+	{
+		Vector d = Apply(new Point(v.X * 100.0, v.Y * 100.0)) - Apply(new Point(0.0, 0.0));
+		d.Normalize();
+		return d;
+	}
 
 	public Point Apply(Point p)
 	{
@@ -376,4 +436,23 @@ public class LayoutFit
 	}
 
 
+}
+
+// El muro del logo que eligió Room Studio (el que se ve al entrar), para que Place Logo lo use
+public class LogoTarget
+{
+	public long WallId;
+
+	public int Sign;
+
+	public double U0;
+
+	public double U1;
+
+	public string Room;
+}
+
+public static class DesignMemory
+{
+	public static readonly Dictionary<string, LogoTarget> LogoWalls = new Dictionary<string, LogoTarget>();
 }

@@ -40,6 +40,12 @@ public class LogoCommand : IExternalCommand
 			orderby r.Area descending
 			select r).ToList();
 		string receptionNames = (receptions.Count == 0) ? null : string.Join(", ", receptions.Select((Room r) => r.get_Parameter(BuiltInParameter.ROOM_NAME)?.AsString()).Distinct().Take(3));
+		// Si Room Studio cargó el JSON del diseño, el muro del logo es el que se ve desde la entrada principal
+		LogoTarget target = DesignMemory.LogoWalls.TryGetValue(StudioCommand.DocKey(doc), out var t0) && doc.GetElement(new ElementId(t0.WallId)) is Wall ? t0 : null;
+		if (target != null)
+		{
+			receptionNames = "the wall facing the main entrance, from Room Studio";
+		}
 
 		LogoWindow window = new LogoWindow(LogoPlacer.FindLogo(uiapp, doc), receptionNames, walls.Count, _widthText, _heightText, parse);
 		if (window.ShowDialog() != true)
@@ -55,7 +61,9 @@ public class LogoCommand : IExternalCommand
 		Dictionary<ElementId, List<int>> choice = new Dictionary<ElementId, List<int>>();
 		if (window.UseReception)
 		{
-			LogoSpot spot = new LogoPlacer(doc, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters)).ReceptionSpot(receptions, window.CenterHeight, width, height);
+			LogoPlacer finder = new LogoPlacer(doc, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters));
+			LogoSpot spot = (target == null) ? null : finder.SpotOn((Wall)doc.GetElement(new ElementId(target.WallId)), target.Sign, target.U0, target.U1, window.CenterHeight, width, height, out _);
+			spot = spot ?? finder.ReceptionSpot(receptions, window.CenterHeight, width, height);
 			if (spot == null)
 			{
 				TaskDialog.Show(ToolName, "No reception or lobby wall has room for a logo " + Fmt(width) + " wide (walls with windows don't count). Try a smaller width, or select the walls yourself and run Place Logo again.");

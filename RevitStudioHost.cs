@@ -25,6 +25,9 @@ internal class RevitStudioHost : IStudioHost
 
 		public bool Core;
 
+		// Cara del core que da al pasillo (según el JSON)
+		public bool CoreFront;
+
 		public string Block;
 
 		public bool Unroomed;
@@ -136,6 +139,37 @@ internal class RevitStudioHost : IStudioHost
 	private long _layoutLevel = -1;
 
 	public string LayoutNote { get; private set; }
+
+	// Carpeta que crea el add-in de Qbiq al cargar el diseño: Documentos\QBIQ_DEV_DATA\<Design ID>
+	public string DesignFolder
+	{
+		get
+		{
+			string root = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QBIQ_DEV_DATA");
+			string id = LogoPlacer.DesignId(_uidoc.Application);
+			string byId = string.IsNullOrEmpty(id) ? null : System.IO.Path.Combine(root, id);
+			return (byId != null && System.IO.Directory.Exists(byId)) ? byId : (System.IO.Directory.Exists(root) ? root : null);
+		}
+	}
+
+	// Core y entrada del JSON ya en coordenadas del modelo
+	private readonly List<List<XYZ>> _cores = new List<List<XYZ>>();
+
+	private XYZ _entrance;
+
+	private XYZ _entranceOut;
+
+	private FaceState _logoFace;
+
+	// El muro del logo (el que se ve desde la entrada principal), para Place Logo
+	public LogoTarget LogoTarget => (_logoFace == null) ? null : new LogoTarget
+	{
+		WallId = _logoFace.Face.Wall.Id.Value,
+		Sign = _logoFace.Face.Sign,
+		U0 = _logoFace.Face.U0,
+		U1 = _logoFace.Face.U1,
+		Room = NameOf(_logoFace.RoomId)
+	};
 
 	private readonly Dictionary<long, List<FoundRoom>> _enclosures = new Dictionary<long, List<FoundRoom>>();
 
@@ -273,8 +307,21 @@ internal class RevitStudioHost : IStudioHost
 					where d != null
 					select d).ToList()
 			};
+			if (level.Id.Value == _layoutLevel)
+			{
+				plan.Cores = _cores.Select((List<XYZ> c) => c.Select((XYZ p) => new Point(p.X, p.Y)).ToArray()).ToList();
+				if (_entrance != null)
+				{
+					plan.Entrance = new Point(_entrance.X, _entrance.Y);
+					plan.EntranceOut = new Vector(_entranceOut.X, _entranceOut.Y);
+				}
+			}
 			result.Add(plan);
 			AddFaces(level, rooms, adopted, layoutIds, onLevel.Where(Usable).ToList());
+			if (level.Id.Value == _layoutLevel)
+			{
+				_logoFace = PickLogoFace();
+			}
 		}
 		return result;
 	}
@@ -425,8 +472,82 @@ internal class RevitStudioHost : IStudioHost
 		_layout = layout;
 		_fit = best;
 		_layoutLevel = bestLevel;
+		foreach (Point[] core in layout.Cores)
+		{
+			_cores.Add(core.Select((Point p) => _fit.Apply(p)).Select((Point p) => new XYZ(p.X, p.Y, 0.0)).ToList());
+		}
+		if (layout.Entrance.HasValue)
+		{
+			Point e = _fit.Apply(layout.Entrance.Value);
+			_entrance = new XYZ(e.X, e.Y, 0.0);
+			Vector v = (layout.EntranceDir.LengthSquared > 1E-09) ? _fit.ApplyDir(layout.EntranceDir) : new Vector(0.0, 0.0);
+			XYZ dir = new XYZ(v.X, v.Y, 0.0);
+			// Hacia afuera del core: el lado de la puerta que no cae dentro del core
+			_entranceOut = (dir.GetLength() > 0.0 && _cores.Any((List<XYZ> c) => Contains(c, _entrance + dir * 1.5))) ? dir.Negate() : dir;
+		}
 		string levelName = (_doc.GetElement(new ElementId(bestLevel)) as Level)?.Name ?? "";
 		LayoutNote = $"Rooms from {file} on {levelName}: {layout.Rooms.Count} rooms, {Math.Round(best.Score * 100.0)}% of its walls line up with the model.";
+		LayoutNote += (layout.Cores.Count > 0 || layout.Entrance.HasValue) ? " The core and the main entrance come from it too." : " It has no core or main entrance (the design JSON downloaded from the platform has them).";
+	}
+
+	private static double EdgeDistance(List<XYZ> poly, XYZ p)
+	{
+		double best = double.MaxValue;
+		for (int i = 0; i < poly.Count; i++)
+		{
+			XYZ a = poly[i];
+			XYZ ab = poly[(i + 1) % poly.Count] - a;
+			double len = ab.DotProduct(ab);
+			double t = (len < 1E-09) ? 0.0 : Math.Max(0.0, Math.Min(1.0, (p - a).DotProduct(ab) / len));
+			best = Math.Min(best, (a + ab * t - p).GetLength());
+		}
+		return best;
+	}
+
+	// El muro del logo: el que se ve de frente al salir por la entrada principal, en la recepción si hay;
+	// si la recepción no tiene ninguno de frente, cualquier muro a menos de 15 m de la entrada
+	private FaceState PickLogoFace()
+	{
+		if (_entrance == null)
+		{
+			return null;
+		}
+		double minLen = UnitUtils.ConvertToInternalUnits(1.2, UnitTypeId.Meters);
+		List<FaceState> usable = _faces.Where((FaceState f) => f.LevelId == _layoutLevel && f.Block == null && f.Face.U1 - f.Face.U0 >= minLen && !WallRules.IsService((f.RoomId != 0) ? NameOf(f.RoomId) : "")).ToList();
+		List<FaceState> reception = usable.Where((FaceState f) => f.RoomId != 0 && (LogoPlacer.IsReception(NameOf(f.RoomId)) || ClientBoards.ZoneOf(NameOf(f.RoomId)) == ArtZone.Reception)).ToList();
+		FaceState best = BestFacing(reception, true);
+		return best ?? BestFacing(usable, false);
+	}
+
+	private FaceState BestFacing(List<FaceState> faces, bool anyDistance)
+	{
+		double near = UnitUtils.ConvertToInternalUnits(15.0, UnitTypeId.Meters);
+		FaceState best = null;
+		double bestScore = 0.0;
+		foreach (FaceState f in faces)
+		{
+			XYZ mid = RoomFinder.Flat((f.Face.A + f.Face.B) / 2.0);
+			XYZ toEntrance = RoomFinder.Flat(_entrance) - mid;
+			double dist = toEntrance.GetLength();
+			if (dist < 0.5 || (!anyDistance && dist > near))
+			{
+				continue;
+			}
+			// Que mire hacia la entrada y, si se sabe, que quede delante de quien sale
+			double facing = RoomFinder.Flat(f.Face.Normal).Normalize().DotProduct(toEntrance / dist);
+			double ahead = (_entranceOut.GetLength() > 0.0) ? (-toEntrance / dist).DotProduct(_entranceOut) : 1.0;
+			if (facing < 0.3 || ahead < 0.0)
+			{
+				continue;
+			}
+			double score = facing * (0.5 + ahead) * Math.Sqrt(Math.Min(f.Face.U1 - f.Face.U0, 15.0)) / (1.0 + dist / 10.0);
+			if (score > bestScore)
+			{
+				bestScore = score;
+				best = f;
+			}
+		}
+		return best;
 	}
 
 	private bool InLayoutRoom(Room r)
@@ -639,6 +760,23 @@ internal class RevitStudioHost : IStudioHost
 		}
 		WallInfo info = Info(face.Wall);
 		string block = info.Windows ? "Window wall: nothing goes on walls with windows" : null;
+		bool coreFront = false;
+		if (block == null && level.Id.Value == _layoutLevel && _cores.Count > 0)
+		{
+			// Con el core del JSON: las caras que dan al pasillo son de core; las de adentro sin room, no se usan
+			XYZ mid = (face.A + face.B) / 2.0;
+			XYZ axis = RoomFinder.Flat(mid - face.Normal * (face.Wall.Width / 2.0));
+			XYZ front = RoomFinder.Flat(mid + face.Normal * 1.0);
+			bool frontInCore = _cores.Any((List<XYZ> c) => Contains(c, front));
+			if (frontInCore && roomId == 0)
+			{
+				block = "Inside the core (elevators, stairs, restrooms)";
+			}
+			else if (!frontInCore && _cores.Any((List<XYZ> c) => EdgeDistance(c, axis) <= face.Wall.Width / 2.0 + 0.5))
+			{
+				coreFront = true;
+			}
+		}
 		if (block == null && roomId == 0 && Outside(level, face))
 		{
 			block = "Facade: this side faces outside the building";
@@ -650,7 +788,8 @@ internal class RevitStudioHost : IStudioHost
 			RoomId = roomId,
 			Face = face,
 			Drywall = dry,
-			Core = info.Core,
+			Core = info.Core || coreFront,
+			CoreFront = coreFront,
 			Block = block,
 			Unroomed = roomId == 0 && block == null && InSmallSpace(level, face)
 		};
@@ -1400,7 +1539,7 @@ internal class RevitStudioHost : IStudioHost
 	{
 		List<FaceState> picks = new List<FaceState>();
 		foreach (IGrouping<long, FaceState> room in from f in _faces
-			where f.RoomId != 0 && Allowed(f) && !IsTv(f.RoomId)
+			where f.RoomId != 0 && Allowed(f) && !IsTv(f.RoomId) && f != _logoFace
 			group f by f.RoomId)
 		{
 			string name = NameOf(room.Key);
@@ -1415,7 +1554,8 @@ internal class RevitStudioHost : IStudioHost
 			picks.AddRange(room.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= min).OrderByDescending((FaceState f) => f.Face.U1 - f.Face.U0).Take(take));
 		}
 		double freeMin = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
-		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && Allowed(f) && f.Face.U1 - f.Face.U0 >= freeMin));
+		double coreMin = UnitUtils.ConvertToInternalUnits(1.5, UnitTypeId.Meters);
+		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && f != _logoFace && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? coreMin : freeMin)));
 		return picks;
 	}
 
@@ -1427,7 +1567,7 @@ internal class RevitStudioHost : IStudioHost
 		double m15 = UnitUtils.ConvertToInternalUnits(1.5, UnitTypeId.Meters);
 		double m3 = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
 		foreach (IGrouping<long, FaceState> room in from f in _faces
-			where f.RoomId != 0 && Allowed(f) && !f.TvWall
+			where f.RoomId != 0 && Allowed(f) && !f.TvWall && f != _logoFace
 			group f by f.RoomId)
 		{
 			if (room.Any((FaceState f) => f.On) || WallRules.IsService(NameOf(room.Key)))
@@ -1447,11 +1587,12 @@ internal class RevitStudioHost : IStudioHost
 				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(IsTv(room.Key) ? 1 : 2));
 				break;
 			case ArtZone.Reception:
-				picks.AddRange(longest.Skip((longest.Count > 1) ? 1 : 0).Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(1));
+				// El muro del logo ya quedó afuera; sin él, se reserva el más largo
+				picks.AddRange(longest.Skip((_logoFace == null && longest.Count > 1) ? 1 : 0).Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(1));
 				break;
 			}
 		}
-		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && Allowed(f) && f.Face.U1 - f.Face.U0 >= m3));
+		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && f != _logoFace && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? m15 : m3)));
 		return picks;
 	}
 
@@ -1496,12 +1637,13 @@ internal class RevitStudioHost : IStudioHost
 			A = new Point(f.Face.A.X, f.Face.A.Y),
 			B = new Point(f.Face.B.X, f.Face.B.Y),
 			Normal = new Vector(f.Face.Normal.X, f.Face.Normal.Y),
-			Title = (f.RoomId != 0) ? $"{side} wall of {NameOf(f.RoomId)}, {length}" : (f.Unroomed ? $"Wall of a closed space with no room in Revit, {length}" : $"Wall with no room, {length}"),
+			Title = (f.RoomId != 0) ? $"{side} wall of {NameOf(f.RoomId)}, {length}" : (f.CoreFront ? $"Core wall facing the corridor, {length}" : (f.Unroomed ? $"Wall of a closed space with no room in Revit, {length}" : $"Wall with no room, {length}")),
 			WallType = f.Face.Wall.WallType.Name,
 			Allowed = Allowed(f),
 			Reason = Why(f),
 			Core = f.Core,
 			TvWall = f.TvWall,
+			Logo = f == _logoFace,
 			On = f.On || f.TvWall,
 			Suggested = f.Suggested,
 			Problem = _faceProblems.TryGetValue(f.Key, out var p) ? p : null,

@@ -930,7 +930,7 @@ public class StudioWindow : Window
 		{
 			Filter = "Qbiq design JSON (*.json)|*.json",
 			Title = "Load the design JSON",
-			InitialDirectory = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
+			InitialDirectory = _host.DesignFolder ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
 		};
 		if (dlg.ShowDialog(this) != true)
 		{

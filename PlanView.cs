@@ -26,6 +26,10 @@ public class PlanView : FrameworkElement
 
 	private static readonly Pen SeparatorPen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(160, 166, 176))), 1.2) { DashStyle = new DashStyle(new double[] { 4, 3 }, 0) });
 
+	private static readonly Brush CoreFill = Freeze(new SolidColorBrush(Color.FromArgb(150, 168, 172, 180)));
+
+	private static readonly Pen LogoPen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(214, 51, 132))), 3.0) { StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat });
+
 	private static readonly Pen SkippedPen = Freeze(new Pen(Theme.Muted, 1.5) { DashStyle = new DashStyle(new double[] { 2, 2 }, 0) });
 
 	private static readonly Typeface Regular = new Typeface(Theme.Font, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
@@ -188,6 +192,16 @@ public class PlanView : FrameworkElement
 			Brush fill = (room.Use == RoomUse.Artwork) ? ArtFill : ((room.Use == RoomUse.Tv) ? TvFill : ((room == _hoverRoom) ? HoverFill : RoomFill));
 			dc.DrawGeometry(fill, null, RoomGeometry(room));
 		}
+		foreach (Point[] core in _level.Cores)
+		{
+			StreamGeometry cg = new StreamGeometry();
+			using (StreamGeometryContext ctx = cg.Open())
+			{
+				ctx.BeginFigure(ToScreen(core[0]), isFilled: true, isClosed: true);
+				ctx.PolyLineTo(core.Skip(1).Select(ToScreen).ToList(), isStroked: false, isSmoothJoin: false);
+			}
+			dc.DrawGeometry(CoreFill, null, cg);
+		}
 		foreach (PlanWall wall in _level.Walls.Where((PlanWall w) => w.Path.Length > 1))
 		{
 			Pen pen = wall.Separator ? SeparatorPen : new Pen(WallBrush, Math.Max(1.5, wall.Thickness * _scale)) { StartLineCap = PenLineCap.Square, EndLineCap = PenLineCap.Square, LineJoin = PenLineJoin.Miter };
@@ -227,6 +241,20 @@ public class PlanView : FrameworkElement
 		{
 			DrawLabel(dc, room, dpi);
 		}
+		foreach (Point[] core in _level.Cores)
+		{
+			Point c = ToScreen(new Point(core.Average((Point p) => p.X), core.Average((Point p) => p.Y)));
+			FormattedText t = Text("Core", Medium, 12.0, Theme.Muted, dpi);
+			dc.DrawText(t, new Point(c.X - t.Width / 2.0, c.Y - t.Height / 2.0));
+		}
+		if (_level.Entrance.HasValue)
+		{
+			DrawEntrance(dc, dpi);
+		}
+		foreach (PlanFace f in _faces.Where((PlanFace f) => f.LevelId == _level.Id && f.Logo))
+		{
+			DrawLogo(dc, f, dpi);
+		}
 		if (_hoverAdd != null)
 		{
 			DrawTip(dc, "Add a piece", "Adds one more piece from this room's zone on this wall.", dpi);
@@ -239,6 +267,44 @@ public class PlanView : FrameworkElement
 		{
 			DrawTip(dc, _hoverFace.Title, _hoverFace.WallType + (_hoverFace.Core ? ", core wall. " : ". ") + FaceHint(_hoverFace), dpi);
 		}
+	}
+
+	// Entrada principal: flecha hacia adentro de la oficina
+	private void DrawEntrance(DrawingContext dc, double dpi)
+	{
+		Point at = ToScreen(_level.Entrance.Value);
+		Vector d = new Vector(_level.EntranceOut.X, -_level.EntranceOut.Y);
+		if (d.LengthSquared < 1E-09)
+		{
+			d = new Vector(0.0, 1.0);
+		}
+		d.Normalize();
+		Vector side = new Vector(-d.Y, d.X);
+		Point tip = at + d * 16.0;
+		StreamGeometry g = new StreamGeometry();
+		using (StreamGeometryContext ctx = g.Open())
+		{
+			ctx.BeginFigure(tip, isFilled: true, isClosed: true);
+			ctx.PolyLineTo(new[] { at + side * 7.0, at - side * 7.0 }, isStroked: false, isSmoothJoin: false);
+		}
+		dc.DrawGeometry(Theme.Dark, null, g);
+		FormattedText t = Text("Main entrance", Medium, 11.0, Theme.Dark, dpi);
+		dc.DrawText(t, tip + d * 4.0 + new Vector((d.X >= 0.0) ? 0.0 : (0.0 - t.Width), -t.Height / 2.0));
+	}
+
+	// Muro del logo: línea rosada con la etiqueta "Logo"
+	private void DrawLogo(DrawingContext dc, PlanFace f, double dpi)
+	{
+		Point[] l = FaceLine(f);
+		Vector n = f.Normal;
+		n.Normalize();
+		Vector nn = new Vector(n.X, -n.Y);
+		dc.DrawLine(LogoPen, l[0] + nn * 3.0, l[1] + nn * 3.0);
+		FormattedText t = Text("Logo", Medium, 10.5, Brushes.White, dpi);
+		Point c = new Point((l[0].X + l[1].X) / 2.0, (l[0].Y + l[1].Y) / 2.0) + nn * 16.0;
+		Rect r = new Rect(c.X - t.Width / 2.0 - 5.0, c.Y - t.Height / 2.0 - 1.0, t.Width + 10.0, t.Height + 2.0);
+		dc.DrawRoundedRectangle(LogoPen.Brush, null, r, 4.0, 4.0);
+		dc.DrawText(t, new Point(r.X + 5.0, r.Y + 1.0));
 	}
 
 	// Puerta: una línea roja sobre el muro, del ancho de la abertura y del grosor del muro
@@ -311,6 +377,11 @@ public class PlanView : FrameworkElement
 		if (f.TvWall)
 		{
 			return "The TV is on this wall. Click the TV to move it.";
+		}
+		string logo = f.Logo ? "Logo wall: the one you see from the main entrance; Place Logo puts the logo here. " : "";
+		if (f.Logo && !f.On)
+		{
+			return logo + "Click to put artwork here anyway.";
 		}
 		if (f.On && f.Problem != null)
 		{

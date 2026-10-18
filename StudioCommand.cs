@@ -20,7 +20,7 @@ public class StudioCommand : IExternalCommand
 			return Result.Cancelled;
 		}
 		// El JSON del diseño se recuerda por proyecto mientras Revit esté abierto
-		string docKey = string.IsNullOrEmpty(uidoc.Document.PathName) ? uidoc.Document.Title : uidoc.Document.PathName;
+		string docKey = DocKey(uidoc.Document);
 		DesignLayout layout = null;
 		if (_settings.Layouts.TryGetValue(docKey, out var remembered) && File.Exists(remembered))
 		{
@@ -44,6 +44,15 @@ public class StudioCommand : IExternalCommand
 			new System.Windows.Interop.WindowInteropHelper(window).Owner = commandData.Application.MainWindowHandle;
 			window.WindowStartupLocation = System.Windows.WindowStartupLocation.CenterOwner;
 			bool? result = window.ShowDialog();
+			// Place Logo usa el muro que se ve desde la entrada principal del JSON
+			if (host.LogoTarget != null)
+			{
+				DesignMemory.LogoWalls[docKey] = host.LogoTarget;
+			}
+			else
+			{
+				DesignMemory.LogoWalls.Remove(docKey);
+			}
 			if (window.RequestedLayout != null)
 			{
 				DesignLayout read = TryRead(window.RequestedLayout);
@@ -67,6 +76,11 @@ public class StudioCommand : IExternalCommand
 			host.Place(window.Skipped);
 			return Result.Succeeded;
 		}
+	}
+
+	public static string DocKey(Document doc)
+	{
+		return string.IsNullOrEmpty(doc.PathName) ? doc.Title : doc.PathName;
 	}
 
 	private static DesignLayout TryRead(string path)

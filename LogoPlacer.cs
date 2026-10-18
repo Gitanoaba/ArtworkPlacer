@@ -165,7 +165,7 @@ internal class LogoPlacer : WallFaces
 	}
 
 	// El Design ID que muestra el add-in de Qbiq en su panel del ribbon
-	private static string DesignId(Autodesk.Revit.UI.UIApplication uiapp)
+	public static string DesignId(Autodesk.Revit.UI.UIApplication uiapp)
 	{
 		try
 		{
