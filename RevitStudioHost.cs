@@ -28,6 +28,9 @@ internal class RevitStudioHost : IStudioHost
 		// Cara del core que da al pasillo (según el JSON)
 		public bool CoreFront;
 
+		// Da a la circulación del JSON (pasillo)
+		public bool Corridor;
+
 		public string Block;
 
 		public bool Unroomed;
@@ -151,6 +154,39 @@ internal class RevitStudioHost : IStudioHost
 			return (byId != null && System.IO.Directory.Exists(byId)) ? byId : (System.IO.Directory.Exists(root) ? root : null);
 		}
 	}
+
+	// Tramos de una cara tapados por algo (mueble alto, columna, giro de puerta, ventana): ahí no va arte
+	private class FaceBlock
+	{
+		public double U0;
+
+		public double U1;
+
+		public string Reason;
+
+		public FurnKind Kind;
+	}
+
+	private readonly Dictionary<int, List<FaceBlock>> _blocks = new Dictionary<int, List<FaceBlock>>();
+
+	// Caras con un sofá o banco delante: el arte va arriba (preferidas al sugerir)
+	private readonly HashSet<int> _sofaFaces = new HashSet<int>();
+
+	// Muebles de cada nivel (de Revit; del JSON si el modelo no tiene)
+	private readonly Dictionary<long, List<Furnishing>> _furniture = new Dictionary<long, List<Furnishing>>();
+
+	// Del JSON, ya en el modelo: muebles, giros de puertas, ventanas, columnas, pasillos y personas por room
+	private readonly List<Furnishing> _jsonFurniture = new List<Furnishing>();
+
+	private readonly List<Point[]> _jsonSwings = new List<Point[]>();
+
+	private readonly List<Tuple<Point, Point>> _jsonWindows = new List<Tuple<Point, Point>>();
+
+	private readonly List<Point[]> _jsonColumns = new List<Point[]>();
+
+	private readonly List<List<XYZ>> _circulation = new List<List<XYZ>>();
+
+	private readonly Dictionary<long, int> _people = new Dictionary<long, int>();
 
 	// Core y entrada del JSON ya en coordenadas del modelo
 	private readonly List<List<XYZ>> _cores = new List<List<XYZ>>();
@@ -323,6 +359,11 @@ internal class RevitStudioHost : IStudioHost
 			}
 			result.Add(plan);
 			AddFaces(level, rooms, adopted, layoutIds, onLevel.Where(Usable).ToList());
+			List<Furnishing> furniture = FurnitureOn(level);
+			_furniture[level.Id.Value] = furniture;
+			plan.Furniture = furniture.Where((Furnishing f) => f.Kind != FurnKind.Chair).Select((Furnishing f) => new PlanItem { Outline = f.Outline, Kind = f.Kind, Label = f.Label }).ToList();
+			BlockFaces(level, furniture, plan.Doors);
+			AddPeople(plan, furniture);
 			if (level.Id.Value == _layoutLevel)
 			{
 				_logoFace = PickLogoFace();
@@ -481,6 +522,15 @@ internal class RevitStudioHost : IStudioHost
 		{
 			_cores.Add(core.Select((Point p) => _fit.Apply(p)).Select((Point p) => new XYZ(p.X, p.Y, 0.0)).ToList());
 		}
+		Point[] Map(Point[] poly) => poly.Select(_fit.Apply).ToArray();
+		foreach (LayoutRoom lr in layout.Rooms)
+		{
+			_jsonFurniture.AddRange(lr.Furniture.Select((Tuple<string, Point[]> f) => new Furnishing { Name = f.Item1, Outline = Map(f.Item2), Kind = Furnishing.KindOf(f.Item1, null) }));
+			_jsonSwings.AddRange(lr.DoorSwings.Select(Map));
+		}
+		_jsonWindows.AddRange(layout.Windows.Select((Tuple<Point, Point> w) => Tuple.Create(_fit.Apply(w.Item1), _fit.Apply(w.Item2))));
+		_jsonColumns.AddRange(layout.Columns.Select(Map));
+		_circulation.AddRange(layout.Circulation.Select((Point[] c) => Map(c).Select((Point p) => new XYZ(p.X, p.Y, 0.0)).ToList()));
 		if (layout.Entrance.HasValue)
 		{
 			Point e = _fit.Apply(layout.Entrance.Value);
@@ -555,6 +605,335 @@ internal class RevitStudioHost : IStudioHost
 		return best;
 	}
 
+	private static readonly BuiltInCategory[] FurnitureCategories =
+	{
+		BuiltInCategory.OST_Furniture,
+		BuiltInCategory.OST_FurnitureSystems,
+		BuiltInCategory.OST_Casework,
+		BuiltInCategory.OST_SpecialityEquipment,
+		BuiltInCategory.OST_Planting,
+		BuiltInCategory.OST_ElectricalEquipment,
+		BuiltInCategory.OST_PlumbingFixtures,
+		BuiltInCategory.OST_GenericModel,
+		BuiltInCategory.OST_Columns,
+		BuiltInCategory.OST_StructuralColumns
+	};
+
+	// Muebles y columnas del nivel en el modelo. Si el modelo casi no tiene (y hay JSON), los del diseño
+	private List<Furnishing> FurnitureOn(Level level)
+	{
+		List<Furnishing> list = new List<Furnishing>();
+		foreach (FamilyInstance fi in new FilteredElementCollector(_doc).WherePasses(new ElementMulticategoryFilter(FurnitureCategories)).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>())
+		{
+			// Lo colgado de muros (arte, logo, TVs) ya lo ve el que coloca
+			if (fi.Host is Wall || fi.LevelId != level.Id)
+			{
+				continue;
+			}
+			BoundingBoxXYZ bb = fi.get_BoundingBox(null);
+			if (bb == null || bb.Min.Z > level.ProjectElevation + 6.0)
+			{
+				continue;
+			}
+			Point[] outline = Outline(fi, bb);
+			if (outline == null)
+			{
+				continue;
+			}
+			long cat = fi.Category?.Id.Value ?? 0;
+			bool column = cat == (long)BuiltInCategory.OST_Columns || cat == (long)BuiltInCategory.OST_StructuralColumns;
+			string name = fi.Symbol.FamilyName + " " + fi.Symbol.Name;
+			list.Add(new Furnishing
+			{
+				Name = name,
+				Outline = outline,
+				Kind = column ? FurnKind.Column : Furnishing.KindOf(name, bb.Max.Z - level.ProjectElevation)
+			});
+		}
+		if (level.Id.Value == _layoutLevel)
+		{
+			if (list.Count(IsFurniture) < 5)
+			{
+				list.AddRange(_jsonFurniture);
+			}
+			if (!list.Any((Furnishing f) => f.Kind == FurnKind.Column))
+			{
+				list.AddRange(_jsonColumns.Select((Point[] c) => new Furnishing { Name = "Column", Outline = c, Kind = FurnKind.Column }));
+			}
+		}
+		return list;
+	}
+
+	private static bool IsFurniture(Furnishing f)
+	{
+		return f.Kind != FurnKind.Column;
+	}
+
+	// Contorno en planta: la caja de la familia girada con la instancia; si no, la caja del modelo
+	private static Point[] Outline(FamilyInstance fi, BoundingBoxXYZ bb)
+	{
+		try
+		{
+			GeometryInstance gi = fi.get_Geometry(new Options { DetailLevel = ViewDetailLevel.Coarse })?.OfType<GeometryInstance>().FirstOrDefault();
+			BoundingBoxXYZ local = gi?.GetSymbolGeometry()?.GetBoundingBox();
+			if (local != null && local.Max.X - local.Min.X < 60.0 && local.Max.Y - local.Min.Y < 60.0)
+			{
+				XYZ[] c = { local.Min, new XYZ(local.Max.X, local.Min.Y, local.Min.Z), new XYZ(local.Max.X, local.Max.Y, local.Min.Z), new XYZ(local.Min.X, local.Max.Y, local.Min.Z) };
+				return c.Select((XYZ p) => gi.Transform.OfPoint(p)).Select((XYZ p) => new Point(p.X, p.Y)).ToArray();
+			}
+		}
+		catch
+		{
+		}
+		if (bb.Max.X - bb.Min.X > 60.0 || bb.Max.Y - bb.Min.Y > 60.0)
+		{
+			return null;
+		}
+		return new[] { new Point(bb.Min.X, bb.Min.Y), new Point(bb.Max.X, bb.Min.Y), new Point(bb.Max.X, bb.Max.Y), new Point(bb.Min.X, bb.Max.Y) };
+	}
+
+	// Qué tramo de la cara ocupa un contorno pegado a ella (null si no la toca): en coordenadas del muro
+	private class FaceFrame
+	{
+		public FaceState Face;
+
+		public Point A;
+
+		public Vector D;
+
+		public Vector N;
+
+		public FaceFrame(FaceState f)
+		{
+			Line line = (Line)((LocationCurve)f.Face.Wall.Location).Curve;
+			XYZ d3 = RoomFinder.Flat(line.Direction).Normalize();
+			XYZ n3 = RoomFinder.Flat(f.Face.Normal).Normalize();
+			Face = f;
+			A = new Point(f.Face.A.X, f.Face.A.Y);
+			D = new Vector(d3.X, d3.Y);
+			N = new Vector(n3.X, n3.Y);
+		}
+	}
+
+	private static Tuple<double, double> Against(FaceFrame fr, Point[] outline, double gap)
+	{
+		FaceState f = fr.Face;
+		Vector d = fr.D;
+		Vector n = fr.N;
+		Point a = fr.A;
+		double vMin = double.MaxValue, vMax = double.MinValue, sMin = double.MaxValue, sMax = double.MinValue;
+		foreach (Point p in outline)
+		{
+			Vector ap = p - a;
+			double v = ap * n;
+			double s = ap * d;
+			vMin = Math.Min(vMin, v);
+			vMax = Math.Max(vMax, v);
+			sMin = Math.Min(sMin, s);
+			sMax = Math.Max(sMax, s);
+		}
+		if (vMax < 0.05 || vMin > gap)
+		{
+			return null;
+		}
+		double len = f.Face.U1 - f.Face.U0;
+		double s0 = Math.Max(0.0, sMin);
+		double s1 = Math.Min(len, sMax);
+		return (s1 - s0 < 0.1) ? null : Tuple.Create(f.Face.U0 + s0, f.Face.U0 + s1);
+	}
+
+	// Tramos tapados de cada cara del nivel: muebles altos y columnas delante, giro de puertas, ventanas del JSON
+	private void BlockFaces(Level level, List<Furnishing> furniture, List<PlanDoor> doors)
+	{
+		double pad = UnitUtils.ConvertToInternalUnits(15.0, UnitTypeId.Centimeters);
+		List<Point[]> swings = doors.Select(Swing).Where((Point[] s) => s != null).ToList();
+		if (level.Id.Value == _layoutLevel)
+		{
+			swings.AddRange(_jsonSwings);
+		}
+		foreach (FaceState f in _faces.Where((FaceState f) => f.LevelId == level.Id.Value))
+		{
+			FaceFrame fr = new FaceFrame(f);
+			List<FaceBlock> blocks = new List<FaceBlock>();
+			foreach (Furnishing item in furniture)
+			{
+				switch (item.Kind)
+				{
+				case FurnKind.Tall:
+				case FurnKind.Column:
+				case FurnKind.Tv:
+				{
+					Tuple<double, double> r = Against(fr, item.Outline, 0.6);
+					if (r != null)
+					{
+						blocks.Add(new FaceBlock { U0 = r.Item1 - pad, U1 = r.Item2 + pad, Kind = item.Kind, Reason = (item.Kind == FurnKind.Column) ? "a column" : ((item.Kind == FurnKind.Tv) ? "the design's TV" : ("a " + item.Label)) });
+					}
+					break;
+				}
+				case FurnKind.Sofa:
+				{
+					Tuple<double, double> r = Against(fr, item.Outline, 1.0);
+					if (r != null && r.Item2 - r.Item1 >= 2.0)
+					{
+						_sofaFaces.Add(f.Key);
+					}
+					break;
+				}
+				}
+			}
+			foreach (Point[] swing in swings)
+			{
+				Tuple<double, double> r = Against(fr, swing, 0.3);
+				if (r != null)
+				{
+					blocks.Add(new FaceBlock { U0 = r.Item1, U1 = r.Item2, Kind = FurnKind.Low, Reason = "a door swing" });
+				}
+			}
+			if (level.Id.Value == _layoutLevel)
+			{
+				foreach (Tuple<Point, Point> w in _jsonWindows)
+				{
+					Tuple<double, double> r = OnWindow(f, w);
+					if (r != null)
+					{
+						blocks.Add(new FaceBlock { U0 = r.Item1, U1 = r.Item2, Kind = FurnKind.Low, Reason = "a window" });
+					}
+				}
+			}
+			if (blocks.Count == 0)
+			{
+				continue;
+			}
+			_blocks[f.Key] = blocks;
+			// Casi toda la cara tapada: no se usa
+			double covered = Merge(blocks.Where((FaceBlock b) => b.Kind != FurnKind.Tv).Select((FaceBlock b) => Tuple.Create(Math.Max(f.Face.U0, b.U0), Math.Min(f.Face.U1, b.U1)))).Sum((Tuple<double, double> x) => Math.Max(0.0, x.Item2 - x.Item1));
+			if (f.Block == null && covered >= (f.Face.U1 - f.Face.U0) * 0.85)
+			{
+				List<string> why = blocks.Where((FaceBlock b) => b.Kind != FurnKind.Tv).Select((FaceBlock b) => b.Reason).Distinct().Take(2).ToList();
+				f.Block = (why.Contains("a window") ? "Window wall: " : "Blocked: ") + string.Join(" and ", why) + ((why.Count == 1 && why[0] == "a window") ? " in the design" : " in front of it");
+			}
+		}
+	}
+
+	// Giro de una puerta de Revit: un cuadrado del ancho de la hoja a cada lado del muro
+	private static Point[] Swing(PlanDoor door)
+	{
+		Vector along = door.Along;
+		Vector facing = door.Facing;
+		if (along.LengthSquared < 1E-09 || facing.LengthSquared < 1E-09)
+		{
+			return null;
+		}
+		along.Normalize();
+		facing.Normalize();
+		Vector half = along * (door.Width / 2.0);
+		Vector deep = facing * door.Width;
+		return new[] { door.Center - half - deep, door.Center + half - deep, door.Center + half + deep, door.Center - half + deep };
+	}
+
+	// Una ventana del JSON sobre el muro de esta cara
+	private static Tuple<double, double> OnWindow(FaceState f, Tuple<Point, Point> w)
+	{
+		Line line = (Line)((LocationCurve)f.Face.Wall.Location).Curve;
+		XYZ d3 = RoomFinder.Flat(line.Direction).Normalize();
+		Vector d = new Vector(d3.X, d3.Y);
+		Vector e = w.Item2 - w.Item1;
+		if (e.Length < 0.1 || Math.Abs(Vector.CrossProduct(d, e / e.Length)) > 0.1)
+		{
+			return null;
+		}
+		Point p0 = new Point(line.GetEndPoint(0).X, line.GetEndPoint(0).Y);
+		Vector n = new Vector(0.0 - d.Y, d.X);
+		if (Math.Abs((w.Item1 - p0) * n) > f.Face.Wall.Width + 0.6)
+		{
+			return null;
+		}
+		double u0 = Math.Max(f.Face.U0, Math.Min((w.Item1 - p0) * d, (w.Item2 - p0) * d));
+		double u1 = Math.Min(f.Face.U1, Math.Max((w.Item1 - p0) * d, (w.Item2 - p0) * d));
+		return (u1 - u0 < 0.1) ? null : Tuple.Create(u0, u1);
+	}
+
+	private static List<Tuple<double, double>> Merge(IEnumerable<Tuple<double, double>> ranges)
+	{
+		List<Tuple<double, double>> merged = new List<Tuple<double, double>>();
+		foreach (Tuple<double, double> r in ranges.Where((Tuple<double, double> r) => r.Item2 > r.Item1).OrderBy((Tuple<double, double> r) => r.Item1))
+		{
+			if (merged.Count > 0 && r.Item1 <= merged[merged.Count - 1].Item2)
+			{
+				merged[merged.Count - 1] = Tuple.Create(merged[merged.Count - 1].Item1, Math.Max(merged[merged.Count - 1].Item2, r.Item2));
+			}
+			else
+			{
+				merged.Add(r);
+			}
+		}
+		return merged;
+	}
+
+	// Personas por room: del JSON o, si no, las sillas que hay adentro
+	private void AddPeople(PlanLevel plan, List<Furnishing> furniture)
+	{
+		List<Furnishing> chairs = furniture.Where((Furnishing f) => f.Kind == FurnKind.Chair).ToList();
+		foreach (PlanRoom room in plan.Rooms)
+		{
+			int people = _people.TryGetValue(room.Id, out var p) ? p : 0;
+			if (people == 0 && chairs.Count > 0 && room.Loops.Count > 0)
+			{
+				List<XYZ> poly = room.Loops[0].Select((Point q) => new XYZ(q.X, q.Y, 0.0)).ToList();
+				people = chairs.Count((Furnishing c) => Contains(poly, new XYZ(c.Center.X, c.Center.Y, 0.0)));
+				if (people > 0)
+				{
+					_people[room.Id] = people;
+				}
+			}
+			if (people > 0)
+			{
+				room.AreaText += (people == 1) ? ", 1 person" : $", {people} people";
+			}
+		}
+	}
+
+	// Muro de la TV según el diseño: junto a la TV que trae el diseño, o en la cabecera de la mesa de reuniones
+	private int DesignTvSpot(long roomId, FoundRoom found, TvTarget target)
+	{
+		if (!_furniture.TryGetValue(found.LevelId.Value, out var furniture) || found.Polygon == null || found.Polygon.Count < 3)
+		{
+			return -1;
+		}
+		List<Furnishing> inside = furniture.Where((Furnishing f) => Contains(found.Polygon, new XYZ(f.Center.X, f.Center.Y, 0.0))).ToList();
+		List<int> allowed = Enumerable.Range(0, target.Spots.Count).Where((int i) => SpotAllowed(roomId, target.Spots[i])).ToList();
+		if (allowed.Count == 0)
+		{
+			return -1;
+		}
+		Furnishing tv = inside.FirstOrDefault((Furnishing f) => f.Kind == FurnKind.Tv);
+		if (tv != null)
+		{
+			int best = allowed.OrderBy((int i) => Distance(target.Spots[i].OnFace, tv.Center)).First();
+			return (Distance(target.Spots[best].OnFace, tv.Center) < 4.0) ? best : -1;
+		}
+		Furnishing table = inside.Where((Furnishing f) => f.Kind == FurnKind.Table && f.Elongation > 1.3).OrderByDescending((Furnishing f) => f.Elongation).FirstOrDefault();
+		if (table != null)
+		{
+			Vector axis = table.LongAxis;
+			// La primera (la que el orden normal prefiere, lejos de la puerta) de las que miran a lo largo de la mesa
+			foreach (int i in allowed)
+			{
+				XYZ n = target.Spots[i].Normal;
+				if (n != null && Math.Abs(n.X * axis.X + n.Y * axis.Y) > 0.85)
+				{
+					return i;
+				}
+			}
+		}
+		return -1;
+	}
+
+	private static double Distance(XYZ p, Point q)
+	{
+		return (p == null) ? double.MaxValue : Math.Sqrt((p.X - q.X) * (p.X - q.X) + (p.Y - q.Y) * (p.Y - q.Y));
+	}
+
 	private bool InLayoutRoom(Room r)
 	{
 		if (_fit == null || r.LevelId.Value != _layoutLevel || !(r.Location is LocationPoint lp))
@@ -577,6 +956,10 @@ internal class RevitStudioHost : IStudioHost
 			FoundRoom found = new FoundRoom { LevelId = level.Id, Polygon = poly, Area = Math.Abs(SignedArea(poly)) };
 			found.Walls.AddRange(EdgeWalls(poly, straight));
 			_layoutRooms[id] = new LayoutRoomInfo { Name = lr.Name, LevelId = level.Id, Polygon = poly };
+			if (lr.People.HasValue)
+			{
+				_people[id] = lr.People.Value;
+			}
 			_virtual[id] = found;
 			ids.Add(id);
 		}
@@ -782,7 +1165,9 @@ internal class RevitStudioHost : IStudioHost
 				coreFront = true;
 			}
 		}
-		if (block == null && roomId == 0 && Outside(level, face))
+		// Si da a un pasillo del JSON, no es fachada ni un cuarto sin room
+		bool corridor = roomId == 0 && level.Id.Value == _layoutLevel && _circulation.Count > 0 && _circulation.Any((List<XYZ> c) => Contains(c, RoomFinder.Flat((face.A + face.B) / 2.0 + face.Normal * 1.0)));
+		if (block == null && roomId == 0 && !corridor && Outside(level, face))
 		{
 			block = "Facade: this side faces outside the building";
 		}
@@ -795,8 +1180,9 @@ internal class RevitStudioHost : IStudioHost
 			Drywall = dry,
 			Core = info.Core || coreFront,
 			CoreFront = coreFront,
+			Corridor = corridor,
 			Block = block,
-			Unroomed = roomId == 0 && block == null && InSmallSpace(level, face)
+			Unroomed = roomId == 0 && block == null && !corridor && InSmallSpace(level, face)
 		};
 	}
 
@@ -1150,7 +1536,14 @@ internal class RevitStudioHost : IStudioHost
 	private bool SpotAllowed(long roomId, TvSpot spot)
 	{
 		FaceState f = FaceOf(roomId, spot.Wall, spot.Sign);
-		return spot.Symbol != null && f != null && Allowed(f) && !f.On;
+		if (spot.Symbol == null || f == null || !Allowed(f) || f.On)
+		{
+			return false;
+		}
+		// Un mueble alto, columna o puerta delante tapa la TV (una TV del diseño no: ahí es donde va)
+		double a = spot.Center - spot.Width / 2.0;
+		double b = spot.Center + spot.Width / 2.0;
+		return !_blocks.TryGetValue(f.Key, out var blocks) || !blocks.Any((FaceBlock x) => x.Kind != FurnKind.Tv && x.U1 > a && x.U0 < b);
 	}
 
 	private void PlanTv(long roomId)
@@ -1174,6 +1567,11 @@ internal class RevitStudioHost : IStudioHost
 		TvTarget target = _tvPlacer.RoomTarget(found, 1, _doors);
 		_tvPlans[roomId] = target;
 		target.Current = target.Spots.FindIndex((TvSpot s) => SpotAllowed(roomId, s));
+		int preferred = DesignTvSpot(roomId, found, target);
+		if (preferred >= 0)
+		{
+			target.Current = preferred;
+		}
 		if (target.Current < 0)
 		{
 			_roomProblems[roomId] = target.Spots.Any((TvSpot s) => s.Symbol != null) ? "No drywall wall here fits a TV" : Sentence(target.Note ?? target.Spots.FirstOrDefault()?.Problem ?? "No wall here fits a TV");
@@ -1292,6 +1690,10 @@ internal class RevitStudioHost : IStudioHost
 	{
 		List<Tuple<double, double>> free = new List<Tuple<double, double>>();
 		double at = f.Face.U0;
+		if (_blocks.TryGetValue(f.Key, out var blocks))
+		{
+			taken = taken.Concat(blocks.Select((FaceBlock b) => Tuple.Create(b.U0, b.U1)));
+		}
 		foreach (Tuple<double, double> t in taken.OrderBy((Tuple<double, double> t) => t.Item1))
 		{
 			if (t.Item1 > at)
@@ -1556,7 +1958,7 @@ internal class RevitStudioHost : IStudioHost
 			}
 			int take = open ? 3 : ((m2 >= 40.0) ? 2 : 1);
 			double min = UnitUtils.ConvertToInternalUnits(open ? 3.0 : 1.5, UnitTypeId.Meters);
-			picks.AddRange(room.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= min).OrderByDescending((FaceState f) => f.Face.U1 - f.Face.U0).Take(take));
+			picks.AddRange(room.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= min).OrderByDescending((FaceState f) => _sofaFaces.Contains(f.Key)).ThenByDescending((FaceState f) => f.Face.U1 - f.Face.U0).Take(take));
 		}
 		double freeMin = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
 		double coreMin = UnitUtils.ConvertToInternalUnits(1.5, UnitTypeId.Meters);
@@ -1579,7 +1981,8 @@ internal class RevitStudioHost : IStudioHost
 			{
 				continue;
 			}
-			List<FaceState> longest = room.OrderByDescending((FaceState f) => f.Face.U1 - f.Face.U0).ToList();
+			// Los muros con un sofá delante primero (el arte va arriba), después los más largos
+			List<FaceState> longest = room.OrderByDescending((FaceState f) => _sofaFaces.Contains(f.Key)).ThenByDescending((FaceState f) => f.Face.U1 - f.Face.U0).ToList();
 			switch (ZoneOfRoom(room.Key))
 			{
 			case ArtZone.General:
@@ -1642,7 +2045,7 @@ internal class RevitStudioHost : IStudioHost
 			A = new Point(f.Face.A.X, f.Face.A.Y),
 			B = new Point(f.Face.B.X, f.Face.B.Y),
 			Normal = new Vector(f.Face.Normal.X, f.Face.Normal.Y),
-			Title = (f.RoomId != 0) ? $"{side} wall of {NameOf(f.RoomId)}, {length}" : (f.CoreFront ? $"Core wall facing the corridor, {length}" : (f.Unroomed ? $"Wall of a closed space with no room in Revit, {length}" : $"Wall with no room, {length}")),
+			Title = ((f.RoomId != 0) ? $"{side} wall of {NameOf(f.RoomId)}, {length}" : (f.CoreFront ? $"Core wall facing the corridor, {length}" : f.Corridor ? $"Corridor wall, {length}" : (f.Unroomed ? $"Wall of a closed space with no room in Revit, {length}" : $"Wall with no room, {length}"))) + PartlyBlocked(f),
 			WallType = f.Face.Wall.WallType.Name,
 			Allowed = Allowed(f),
 			Reason = Why(f),
@@ -1654,6 +2057,17 @@ internal class RevitStudioHost : IStudioHost
 			Problem = _faceProblems.TryGetValue(f.Key, out var p) ? p : null,
 			AddAt = AddPoint(f)
 		};
+	}
+
+	// Lo que tapa parte de una cara que igual se puede usar: el arte lo esquiva
+	private string PartlyBlocked(FaceState f)
+	{
+		if (f.Block != null || !_blocks.TryGetValue(f.Key, out var blocks))
+		{
+			return "";
+		}
+		List<string> what = blocks.Select((FaceBlock b) => b.Reason).Distinct().Take(3).ToList();
+		return " (artwork keeps clear of " + string.Join(", ", what) + ")";
 	}
 
 	private Point? AddPoint(FaceState f)

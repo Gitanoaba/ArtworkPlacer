@@ -19,6 +19,15 @@ public class LayoutRoom
 
 	public Point[] Polygon;
 
+	// Personas que entran (head_count), si el JSON lo dice
+	public int? People;
+
+	// Muebles del diseño: nombre y contorno, en cm del JSON
+	public List<Tuple<string, Point[]>> Furniture = new List<Tuple<string, Point[]>>();
+
+	// Áreas de giro de las puertas del room
+	public List<Point[]> DoorSwings = new List<Point[]>();
+
 	public string Name
 	{
 		get
@@ -47,6 +56,13 @@ public class DesignLayout
 
 	public Vector EntranceDir;
 
+	// Ventanas (ejes), columnas y la circulación (pasillos)
+	public List<Tuple<Point, Point>> Windows = new List<Tuple<Point, Point>>();
+
+	public List<Point[]> Columns = new List<Point[]>();
+
+	public List<Point[]> Circulation = new List<Point[]>();
+
 	private static readonly Regex Num = new Regex("-?\\d+(?:\\.\\d+)?(?:[eE][-+]?\\d+)?");
 
 	public static DesignLayout Read(string path)
@@ -70,12 +86,43 @@ public class DesignLayout
 			{
 				continue;
 			}
-			layout.Rooms.Add(new LayoutRoom
+			LayoutRoom room = new LayoutRoom
 			{
 				Type = (Get(r, "space_type") as string) ?? (Get(r, "room_type") as string) ?? "Room",
 				Subtype = (Get(r, "subtype") as string) ?? (Get(r, "room_subtype") as string),
 				Polygon = poly
-			});
+			};
+			try
+			{
+				int people = Convert.ToInt32(Get(r, "head_count") ?? 0, CultureInfo.InvariantCulture);
+				room.People = (people > 0) ? new int?(people) : null;
+			}
+			catch
+			{
+			}
+			// Cada mueble: su caja local (geom_box) llevada a la planta con su matriz
+			foreach (Dictionary<string, object> c in Dicts(Get(r, "stencil_geometry_components")))
+			{
+				if ((Get(c, "show") is bool show && !show) || (Get(c, "is_remove") is bool removed && removed))
+				{
+					continue;
+				}
+				double[] m = Matrix(Get(c, "matrix"));
+				Point[] box = Polygon(Get(c, "geom_box") as string);
+				if (m != null && box != null && box.Length >= 3)
+				{
+					room.Furniture.Add(Tuple.Create((Get(c, "name") as string) ?? "", box.Select((Point p) => new Point(m[0] * p.X + m[1] * p.Y + m[2], m[3] * p.X + m[4] * p.Y + m[5])).ToArray()));
+				}
+			}
+			foreach (Dictionary<string, object> d in Dicts(Get(r, "doors")))
+			{
+				Point[] swing = Polygon(Get(d, "clearance_geometry") as string);
+				if (swing != null && swing.Length >= 3)
+				{
+					room.DoorSwings.Add(swing);
+				}
+			}
+			layout.Rooms.Add(room);
 		}
 		if (Get(root, "nfp_data") is Dictionary<string, object> nfp)
 		{
@@ -109,6 +156,16 @@ public class DesignLayout
 					layout.Entrance = at[0];
 				}
 			}
+			foreach (Dictionary<string, object> w in Dicts(Get(nfp, "windows")))
+			{
+				Point? a = Pt(Get(w, "corner1"));
+				Point? b = Pt(Get(w, "corner2"));
+				if (a.HasValue && b.HasValue && (b.Value - a.Value).Length > 1.0)
+				{
+					layout.Windows.Add(Axis(a.Value, b.Value));
+				}
+			}
+			layout.Columns.AddRange(Polygons(Get(nfp, "columns") as string));
 			foreach (string key in new[] { "walls", "interior_walls" })
 			{
 				if (!(Get(nfp, key) is IEnumerable list))
@@ -126,6 +183,7 @@ public class DesignLayout
 				}
 			}
 		}
+		layout.Circulation.AddRange(Polygons(Get(root, "circulation") as string));
 		// Muros del *_design_data.json: ejes x0,y0 → x1,y1
 		if (Get(root, "walls") is IEnumerable axes)
 		{
@@ -144,6 +202,57 @@ public class DesignLayout
 			throw new InvalidDataException("the JSON has no rooms with a shape");
 		}
 		return layout;
+	}
+
+	private static IEnumerable<Dictionary<string, object>> Dicts(object o)
+	{
+		return (o is IEnumerable list && !(o is string)) ? list.OfType<Dictionary<string, object>>() : Enumerable.Empty<Dictionary<string, object>>();
+	}
+
+	// [[a, b, c], [d, e, f], [0, 0, 1]] → a..f
+	private static double[] Matrix(object o)
+	{
+		List<double> v = new List<double>();
+		if (o is IEnumerable rows && !(o is string))
+		{
+			foreach (object row in rows)
+			{
+				if (row is IEnumerable cells && !(row is string))
+				{
+					v.AddRange(cells.Cast<object>().Select((object x) => Convert.ToDouble(x, CultureInfo.InvariantCulture)));
+				}
+			}
+		}
+		return (v.Count >= 6) ? v.ToArray() : null;
+	}
+
+	// Anillo exterior de cada polígono de un POLYGON o MULTIPOLYGON
+	private static List<Point[]> Polygons(string wkt)
+	{
+		List<Point[]> result = new List<Point[]>();
+		if (string.IsNullOrEmpty(wkt))
+		{
+			return result;
+		}
+		foreach (Match ring in Regex.Matches(wkt, @"\(\(([^()]*)\)"))
+		{
+			List<double> n = (from Match m in Num.Matches(ring.Groups[1].Value)
+				select double.Parse(m.Value, CultureInfo.InvariantCulture)).ToList();
+			List<Point> pts = new List<Point>();
+			for (int i = 0; i + 1 < n.Count; i += 2)
+			{
+				pts.Add(new Point(n[i], n[i + 1]));
+			}
+			if (pts.Count > 2 && (pts[0] - pts[pts.Count - 1]).Length < 0.01)
+			{
+				pts.RemoveAt(pts.Count - 1);
+			}
+			if (pts.Count >= 3)
+			{
+				result.Add(pts.ToArray());
+			}
+		}
+		return result;
 	}
 
 	private static object Get(Dictionary<string, object> d, string key)
