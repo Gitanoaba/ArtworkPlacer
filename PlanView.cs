@@ -248,7 +248,7 @@ public class PlanView : FrameworkElement
 		foreach (Point[] core in _level.Cores)
 		{
 			Point c = ToScreen(new Point(core.Average((Point p) => p.X), core.Average((Point p) => p.Y)));
-			FormattedText t = Text("Core", Medium, 12.0, Theme.Muted, dpi);
+			FormattedText t = Text("Core", Medium, 10.0, Theme.Muted, dpi);
 			dc.DrawText(t, new Point(c.X - t.Width / 2.0, c.Y - t.Height / 2.0));
 		}
 		if (_level.Entrance.HasValue)
@@ -501,8 +501,8 @@ public class PlanView : FrameworkElement
 		Point c = ToScreen(room.Label);
 		List<Point> pts = room.Loops.FirstOrDefault()?.Select(ToScreen).ToList();
 		double width = (pts == null || pts.Count == 0) ? 0.0 : (pts.Max((Point p) => p.X) - pts.Min((Point p) => p.X));
-		FormattedText name = Text(room.Name, Medium, 12.0, Theme.Ink, dpi);
-		FormattedText sub = Text(room.Number, Regular, 11.0, Theme.Muted, dpi);
+		FormattedText name = Text(room.Name, Medium, 10.0, Theme.Ink, dpi);
+		FormattedText sub = Text(room.Number, Regular, 9.5, Theme.Muted, dpi);
 		if (width < 28.0)
 		{
 			return;
