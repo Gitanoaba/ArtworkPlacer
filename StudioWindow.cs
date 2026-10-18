@@ -51,6 +51,18 @@ public class StudioWindow : Window
 
 	private const string TickedTypes = "Ticked types below";
 
+	private const string NoClient = "No client: use the collection below";
+
+	private static readonly string[] ZoneLabels = { "None", "General: corridors and open office", "Kitchen", "Meeting rooms, lounge and club", "Reception" };
+
+	private readonly ComboBox _clientBox = new ComboBox();
+
+	private readonly TextBlock _clientNote = new TextBlock { Foreground = Theme.Muted, FontSize = 12.0, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0.0, 4.0, 0.0, 0.0) };
+
+	private UIElement _collectionField;
+
+	private UIElement _typeBox;
+
 	private const string SameAsPlan = "Same as the plan";
 
 	private readonly TextBlock _summary = new TextBlock { FontWeight = FontWeights.Medium, TextTrimming = TextTrimming.CharacterEllipsis };
@@ -111,7 +123,11 @@ public class StudioWindow : Window
 		foreach (PlanRoom room in host.Levels.SelectMany((PlanLevel l) => l.Rooms))
 		{
 			room.Collection = (settings.RoomCollections.TryGetValue(room.Id, out var rc) && host.Collections.Any((ArtCollection c) => c.Name == rc)) ? rc : null;
+			room.Zone = settings.RoomZones.TryGetValue(room.Id, out var rz) ? new ArtZone?(rz) : null;
 		}
+		_clientBox.Items.Add(NoClient);
+		host.Boards.ForEach((ClientBoard b) => _clientBox.Items.Add(b.Name));
+		_clientBox.SelectedIndex = host.Boards.FindIndex((ClientBoard b) => b.Name == settings.Client) + 1;
 		foreach (TypeItem t in host.TvTypes)
 		{
 			t.IsChecked = (settings.TvChecked.Count > 0) ? settings.TvChecked.Contains(t.Id) : t.IsChecked;
@@ -179,6 +195,12 @@ public class StudioWindow : Window
 		{
 			box.TextChanged += (s, e) => Later();
 		}
+		_clientBox.SelectionChanged += (s, e) =>
+		{
+			ShowClient();
+			RefreshSelection();
+			Later();
+		};
 		foreach (CheckBox box in new[] { _autoSize, _drywallOnly, _artInOffices })
 		{
 			box.Checked += (s, e) => Later();
@@ -196,6 +218,25 @@ public class StudioWindow : Window
 	{
 		HashSet<long> ids = new HashSet<long>(c.Ids);
 		_host.ArtTypes.ForEach((TypeItem t) => t.IsChecked = ids.Contains(t.Id));
+	}
+
+	private ClientBoard SelectedClient => (_clientBox.SelectedIndex > 0) ? _host.Boards[_clientBox.SelectedIndex - 1] : null;
+
+	// Con un cliente, cada room usa las piezas de su zona: la colección y los tipos marcados no cuentan
+	private void ShowClient()
+	{
+		ClientBoard c = SelectedClient;
+		_clientNote.Text = (c == null) ? "Pick a client to use its pieces zone by zone." : $"General {c.Count(ArtZone.General)} · Kitchen {c.Count(ArtZone.Kitchen)} · Meeting/lounge {c.Count(ArtZone.Meeting)} · Reception {c.Count(ArtZone.Reception)}. Each room gets the pieces of its zone; set a room's zone in its panel.";
+		if (_collectionField != null)
+		{
+			_collectionField.IsEnabled = c == null;
+			_collectionField.Opacity = (c == null) ? 1.0 : 0.45;
+		}
+		if (_typeBox != null)
+		{
+			_typeBox.IsEnabled = c == null;
+			_typeBox.Opacity = (c == null) ? 1.0 : 0.45;
+		}
 	}
 
 	internal static bool IsMeeting(string name)
@@ -284,13 +325,23 @@ public class StudioWindow : Window
 		officeNote.Margin = new Thickness(24.0, 2.0, 0.0, 0.0);
 		stack.Children.Add(officeNote);
 		stack.Children.Add(Section("Artwork"));
+		if (_host.Boards.Count > 0)
+		{
+			StackPanel client = Field("Client", _clientBox);
+			client.Margin = new Thickness(0.0, 0.0, 0.0, 4.0);
+			client.Children.Add(_clientNote);
+			stack.Children.Add(client);
+		}
 		if (_host.Collections.Count > 0)
 		{
 			StackPanel collection = Field("Collection", _collectionBox);
-			collection.Margin = new Thickness(0.0, 0.0, 0.0, 8.0);
+			collection.Margin = new Thickness(0.0, 8.0, 0.0, 8.0);
 			stack.Children.Add(collection);
+			_collectionField = collection;
 		}
-		stack.Children.Add(TypeBox(_artList));
+		_typeBox = TypeBox(_artList);
+		stack.Children.Add(_typeBox);
+		ShowClient();
 		stack.Children.Add(Field("Height", Pair(_alignBox, _heightBox)));
 		stack.Children.Add(Field("Clear of doors and corners", _clearBox));
 		stack.Children.Add(Field("Pieces per wall, max", Pair(_maxBox, null)));
@@ -417,7 +468,7 @@ public class StudioWindow : Window
 				req.Uses[room.Id] = RoomUse.Tv;
 			}
 		}
-		if (Run(() => _host.Plan(req)) && _host.ArtTypes.Any((TypeItem t) => t.IsChecked))
+		if (Run(() => _host.Plan(req)) && (_host.ArtTypes.Any((TypeItem t) => t.IsChecked) || SelectedClient != null))
 		{
 			Run(() => _host.Suggest());
 		}
@@ -551,7 +602,11 @@ public class StudioWindow : Window
 		{
 			_selection.Children.Add(new TextBlock { Text = sel[0].Problem, Foreground = Theme.Danger, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0.0, 10.0, 0.0, 0.0) });
 		}
-		if (sel.Count == 1 && sel[0].Use != RoomUse.Tv && _host.Collections.Count > 0)
+		if (sel.Count == 1 && SelectedClient != null)
+		{
+			AddRoomZone(sel[0]);
+		}
+		else if (sel.Count == 1 && sel[0].Use != RoomUse.Tv && _host.Collections.Count > 0)
 		{
 			AddRoomCollection(sel[0]);
 		}
@@ -579,6 +634,28 @@ public class StudioWindow : Window
 		_selection.Children.Add(field);
 	}
 
+	// Zona del room en el tablero del cliente: la de su nombre, o la que elija el usuario
+	private void AddRoomZone(PlanRoom room)
+	{
+		ArtZone auto = ClientBoards.ZoneOf(room.Name);
+		ComboBox box = new ComboBox();
+		box.Items.Add("Auto: " + ZoneLabels[(int)auto]);
+		for (int i = 0; i < ZoneLabels.Length; i++)
+		{
+			box.Items.Add(ZoneLabels[i]);
+		}
+		box.SelectedIndex = room.Zone.HasValue ? ((int)room.Zone.Value + 1) : 0;
+		box.SelectionChanged += (s, e) =>
+		{
+			ArtZone? zone = (box.SelectedIndex > 0) ? new ArtZone?((ArtZone)(box.SelectedIndex - 1)) : null;
+			room.Zone = zone;
+			Run(() => _host.SetRoomZone(room.Id, zone));
+		};
+		StackPanel field = Field(SelectedClient.Name + " zone for this room", box);
+		field.Margin = new Thickness(0.0, 14.0, 0.0, 0.0);
+		_selection.Children.Add(field);
+	}
+
 	private void AddWallsList(PlanRoom room)
 	{
 		List<PlanFace> faces = _state.Faces.Where((PlanFace f) => f.RoomId == room.Id).OrderByDescending((PlanFace f) => f.Allowed).ThenBy((PlanFace f) => f.Title).ToList();
@@ -590,7 +667,7 @@ public class StudioWindow : Window
 		TextBlock heading = Theme.Heading("Walls in this room");
 		heading.Margin = new Thickness(0.0, 18.0, 0.0, 2.0);
 		_selection.Children.Add(heading);
-		TextBlock hint = Theme.Note(tv ? "Pick the wall the TV goes on." : "Tick the walls that get artwork.");
+		TextBlock hint = Theme.Note(tv ? "The TV wall is marked TV; tick other walls for artwork. Click the TV on the plan to move it." : "Tick the walls that get artwork.");
 		hint.FontSize = 12.0;
 		hint.Margin = new Thickness(0.0, 0.0, 0.0, 6.0);
 		_selection.Children.Add(hint);
@@ -599,14 +676,12 @@ public class StudioWindow : Window
 			Grid g = new Grid { Opacity = face.Allowed ? 1.0 : 0.55 };
 			g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 			g.ColumnDefinitions.Add(new ColumnDefinition());
-			FrameworkElement mark = tv ? new Border
+			FrameworkElement mark = face.TvWall ? new Border
 			{
-				Width = 16.0,
-				Height = 16.0,
-				CornerRadius = new CornerRadius(8.0),
-				BorderBrush = face.On ? Theme.Accent : Theme.LineStrong,
-				BorderThickness = new Thickness(face.On ? 5.0 : 1.5),
-				Background = Theme.Panel
+				Background = Theme.Dark,
+				CornerRadius = new CornerRadius(4.0),
+				Padding = new Thickness(4.0, 0.0, 4.0, 0.0),
+				Child = new TextBlock { Text = "TV", Foreground = Theme.Panel, FontSize = 10.5, FontWeight = FontWeights.Bold }
 			} : new CheckBox { IsChecked = face.On, IsHitTestVisible = false, Focusable = false };
 			mark.VerticalAlignment = VerticalAlignment.Top;
 			mark.Margin = new Thickness(0.0, 2.0, 10.0, 0.0);
@@ -767,7 +842,9 @@ public class StudioWindow : Window
 			TvAutoSize = _autoSize.IsChecked == true,
 			DrywallOnly = _drywallOnly.IsChecked == true,
 			ArtInOffices = _artInOffices.IsChecked == true,
-			RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection)
+			RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection),
+			Client = SelectedClient?.Name,
+			RoomZones = AllRooms.Where((PlanRoom r) => r.Zone.HasValue).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Zone.Value)
 		};
 		if (req.ArtAlign != HeightAlign.FamilyDefault)
 		{
@@ -856,5 +933,7 @@ public class StudioWindow : Window
 		_settings.ArtInOffices = _artInOffices.IsChecked == true;
 		_settings.Collection = (_collectionBox.SelectedIndex > 0) ? _host.Collections[_collectionBox.SelectedIndex - 1].Name : null;
 		_settings.RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection);
+		_settings.Client = SelectedClient?.Name;
+		_settings.RoomZones = AllRooms.Where((PlanRoom r) => r.Zone.HasValue).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Zone.Value);
 	}
 }

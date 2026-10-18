@@ -29,6 +29,8 @@ internal class RevitStudioHost : IStudioHost
 
 		public bool Unroomed;
 
+		public bool TvWall;
+
 		public bool On;
 
 		public bool Suggested;
@@ -128,6 +130,12 @@ internal class RevitStudioHost : IStudioHost
 	public List<TypeItem> TvTypes { get; private set; }
 
 	public List<ArtCollection> Collections { get; private set; } = new List<ArtCollection>();
+
+	public List<ClientBoard> Boards { get; private set; } = new List<ClientBoard>();
+
+	private readonly Dictionary<long, ArtZone> _roomZone = new Dictionary<long, ArtZone>();
+
+	private const string ZoneKey = "zone:";
 
 	public RevitStudioHost(UIDocument uidoc, string revitVersion)
 	{
@@ -488,6 +496,7 @@ internal class RevitStudioHost : IStudioHost
 		Func<FamilySymbol, bool> none = (FamilySymbol s) => false;
 		List<TypeItem> all = PlaceArtworkCommand.CollectTypes(_doc, none, new HashSet<long>());
 		Collections = PlaceArtworkCommand.CollectCollections(_doc, all);
+		Boards = ClientBoards.Read(_doc, new HashSet<long>(all.Select((TypeItem t) => t.Id)));
 		HashSet<long> inSections = new HashSet<long>(Collections.SelectMany((ArtCollection c) => c.Ids));
 		List<TypeItem> tv = all.Where((TypeItem t) => PlaceTvCommand.LooksLikeTv(t.Label)).ToList();
 		List<TypeItem> art = all.Where((TypeItem t) => (PlaceArtworkCommand.LooksLikeArtwork(t.Label) || inSections.Contains(t.Id)) && !tv.Contains(t)).ToList();
@@ -561,16 +570,66 @@ internal class RevitStudioHost : IStudioHost
 		{
 			return "No artwork in restrooms, storage or service rooms";
 		}
-		if (WallRules.IsPrivateOffice(name) && (_req == null || !_req.ArtInOffices))
+		if (Client != null && ZoneOfRoom(roomId) == ArtZone.None)
+		{
+			return "No " + Client.Name + " zone for this room. Pick one in the room panel, or choose Artwork for it";
+		}
+		if (Client == null && WallRules.IsPrivateOffice(name) && (_req == null || !_req.ArtInOffices))
 		{
 			return "Private office: no artwork. Choose Artwork for this room to allow it";
 		}
 		return null;
 	}
 
+	// Tablero del cliente elegido (null = artwork por colección o tipos marcados)
+	private ClientBoard Client => (_req?.Client == null) ? null : Boards.FirstOrDefault((ClientBoard b) => b.Name == _req.Client);
+
+	// Zona del room: la elegida en el panel, si no la de su nombre. Sin room (pasillos sin room): General
+	private ArtZone ZoneOfRoom(long roomId)
+	{
+		if (roomId == 0)
+		{
+			return ArtZone.General;
+		}
+		if (_roomZone.TryGetValue(roomId, out var z))
+		{
+			return z;
+		}
+		ArtZone auto = ClientBoards.ZoneOf(RoomName(_rooms[roomId]));
+		return (auto == ArtZone.None && _artRooms.Contains(roomId)) ? ArtZone.General : auto;
+	}
+
 	private string CollectionOf(long roomId)
 	{
-		return (roomId != 0 && _roomCollection.TryGetValue(roomId, out var c)) ? c : "";
+		if (roomId != 0 && _roomCollection.TryGetValue(roomId, out var c))
+		{
+			return c;
+		}
+		return (Client != null) ? (ZoneKey + ZoneOfRoom(roomId)) : "";
+	}
+
+	public PreviewResult SetRoomZone(long roomId, ArtZone? zone)
+	{
+		if (_req == null)
+		{
+			return new PreviewResult { Message = "Fix the settings on the right first." };
+		}
+		if (zone.HasValue)
+		{
+			_roomZone[roomId] = zone.Value;
+		}
+		else
+		{
+			_roomZone.Remove(roomId);
+		}
+		InTransaction(delegate
+		{
+			(from f in _faces
+				where f.RoomId == roomId
+				group f.Face.Wall by f.Face.Wall.Id into g
+				select g.First()).ToList().ForEach(ReplanWall);
+		});
+		return State(null);
 	}
 
 	// Placer de una colección (""= los tipos marcados). Se crea dentro de la transacción de vista previa
@@ -584,10 +643,31 @@ internal class RevitStudioHost : IStudioHost
 		{
 			return placer;
 		}
-		ArtCollection c = Collections.FirstOrDefault((ArtCollection x) => x.Name == collection);
-		List<FamilySymbol> symbols = (c == null) ? new List<FamilySymbol>() : Symbols(c.Ids);
+		List<FamilySymbol> symbols;
+		double gap = _req.Gap;
+		int max = _req.MaxPerFace;
+		if (collection.StartsWith(ZoneKey, StringComparison.Ordinal))
+		{
+			// Piezas de la zona en el tablero del cliente; la cantidad depende de la zona
+			ArtZone zone = (ArtZone)Enum.Parse(typeof(ArtZone), collection.Substring(ZoneKey.Length));
+			symbols = (Client != null && Client.Zones.TryGetValue(zone, out var ids)) ? Symbols(ids) : new List<FamilySymbol>();
+			if (zone == ArtZone.General)
+			{
+				gap = Math.Max(gap, UnitUtils.ConvertToInternalUnits(3.5, UnitTypeId.Meters));
+				max = Math.Max(max, 4);
+			}
+			else
+			{
+				max = 1;
+			}
+		}
+		else
+		{
+			ArtCollection c = Collections.FirstOrDefault((ArtCollection x) => x.Name == collection);
+			symbols = (c == null) ? new List<FamilySymbol>() : Symbols(c.Ids);
+		}
 		Activate(symbols);
-		placer = (symbols.Count == 0) ? null : new WallPlacer(_doc, symbols, _req.ArtHeight, _req.ArtAlign, _req.Clearance, _req.Gap, _req.MaxPerFace, SideMode.Auto, Fmt);
+		placer = (symbols.Count == 0) ? null : new WallPlacer(_doc, symbols, _req.ArtHeight, _req.ArtAlign, _req.Clearance, gap, max, SideMode.Auto, Fmt);
 		_collectionSymbols[collection] = symbols;
 		_placers[collection] = placer;
 		return placer;
@@ -641,6 +721,10 @@ internal class RevitStudioHost : IStudioHost
 			{
 				_roomCollection[kv.Key] = kv.Value;
 			}
+			foreach (KeyValuePair<long, ArtZone> kv in req.RoomZones.Where((KeyValuePair<long, ArtZone> kv) => _rooms.ContainsKey(kv.Key)))
+			{
+				_roomZone[kv.Key] = kv.Value;
+			}
 			_started = true;
 		}
 		_placers.Clear();
@@ -669,7 +753,7 @@ internal class RevitStudioHost : IStudioHost
 	private List<Wall> WallsWithArt()
 	{
 		return (from f in _faces
-			where f.On && !IsTv(f.RoomId)
+			where f.On
 			group f.Face.Wall by f.Face.Wall.Id into g
 			select g.First()).ToList();
 	}
@@ -682,7 +766,7 @@ internal class RevitStudioHost : IStudioHost
 	private bool SpotAllowed(long roomId, TvSpot spot)
 	{
 		FaceState f = FaceOf(roomId, spot.Wall, spot.Sign);
-		return spot.Symbol != null && f != null && Allowed(f);
+		return spot.Symbol != null && f != null && Allowed(f) && !f.On;
 	}
 
 	private void PlanTv(long roomId)
@@ -716,17 +800,22 @@ internal class RevitStudioHost : IStudioHost
 	private void SyncTvFaces(long roomId)
 	{
 		TvSpot chosen = _tvPlans.TryGetValue(roomId, out var t) ? t.Chosen : null;
+		// La TV tiene su muro; el artwork del room puede ir en los otros
 		foreach (FaceState f in _faces.Where((FaceState f) => f.RoomId == roomId))
 		{
-			f.On = chosen != null && f.Face.Wall.Id == chosen.Wall.Id && f.Face.Sign == chosen.Sign;
-			f.Suggested = false;
+			f.TvWall = chosen != null && f.Face.Wall.Id == chosen.Wall.Id && f.Face.Sign == chosen.Sign;
+			if (f.TvWall)
+			{
+				f.On = false;
+				f.Suggested = false;
+			}
 		}
 	}
 
 	private void ReplanWall(Wall wall)
 	{
 		_artPlans.RemoveAll((ArtPlan a) => a.Piece.Wall.Id == wall.Id);
-		List<FaceState> all = _faces.Where((FaceState f) => f.Face.Wall.Id == wall.Id && !IsTv(f.RoomId)).ToList();
+		List<FaceState> all = _faces.Where((FaceState f) => f.Face.Wall.Id == wall.Id).ToList();
 		all.ForEach((FaceState f) => _faceProblems.Remove(f.Key));
 		List<FaceState> on = all.Where((FaceState f) => f.On).ToList();
 		if (on.Count == 0)
@@ -740,7 +829,7 @@ internal class RevitStudioHost : IStudioHost
 			WallPlacer placer = PlacerFor(group.Key);
 			if (placer == null)
 			{
-				string missing = (group.Key.Length == 0) ? "Tick at least one artwork type" : (group.Key + " has no artwork types in this model");
+				string missing = (group.Key.Length == 0) ? "Tick at least one artwork type" : (group.Key.StartsWith(ZoneKey, StringComparison.Ordinal) ? ((Client?.Name ?? "The client") + " has no " + group.Key.Substring(ZoneKey.Length) + " pieces") : (group.Key + " has no artwork types in this model"));
 				faces.ForEach((FaceState f) => _faceProblems[f.Key] = missing);
 				continue;
 			}
@@ -809,6 +898,11 @@ internal class RevitStudioHost : IStudioHost
 				}
 				if (use == RoomUse.Tv)
 				{
+					faces.ForEach(delegate(FaceState f)
+					{
+						f.On = false;
+						f.Suggested = false;
+					});
 					_uses[id] = RoomUse.Tv;
 					PlanTv(id);
 					continue;
@@ -818,6 +912,7 @@ internal class RevitStudioHost : IStudioHost
 				_roomProblems.Remove(id);
 				faces.ForEach(delegate(FaceState f)
 				{
+					f.TvWall = false;
 					f.On = use == RoomUse.Artwork && Allowed(f);
 					f.Suggested = false;
 				});
@@ -842,22 +937,9 @@ internal class RevitStudioHost : IStudioHost
 		{
 			return State(Why(f) + ".");
 		}
-		if (IsTv(f.RoomId))
+		if (f.TvWall)
 		{
-			if (!_tvPlans.TryGetValue(f.RoomId, out var target))
-			{
-				return State("A TV can't be planned in this room.");
-			}
-			int k = target.Spots.FindIndex((TvSpot s) => s.Wall.Id == f.Face.Wall.Id && s.Sign == f.Face.Sign);
-			if (k < 0 || target.Spots[k].Symbol == null)
-			{
-				string why = (k >= 0) ? target.Spots[k].Problem : null;
-				return State("A TV doesn't fit on this wall" + ((why != null) ? (": " + why) : "."));
-			}
-			target.Current = k;
-			_roomProblems.Remove(f.RoomId);
-			SyncTvFaces(f.RoomId);
-			return State(null);
+			return State("The TV is on this wall. Click the TV to move it to another wall.");
 		}
 		f.On = !f.On;
 		f.Suggested = false;
@@ -894,11 +976,11 @@ internal class RevitStudioHost : IStudioHost
 		{
 			return new PreviewResult { Message = "Fix the settings on the right first." };
 		}
-		if (_artSymbols.Count == 0)
+		if (_artSymbols.Count == 0 && Client == null)
 		{
 			return State("Tick at least one artwork type to get suggestions.");
 		}
-		List<FaceState> picks = SuggestedFaces();
+		List<FaceState> picks = (Client != null) ? ClientSuggestions() : SuggestedFaces();
 		picks.ForEach(delegate(FaceState f)
 		{
 			f.On = true;
@@ -917,7 +999,7 @@ internal class RevitStudioHost : IStudioHost
 			failed.Select((FaceState f) => f.Face.Wall).GroupBy((Wall w) => w.Id).Select((IGrouping<ElementId, Wall> g) => g.First()).ToList().ForEach(ReplanWall);
 		});
 		int count = picks.Count((FaceState f) => f.Suggested);
-		return State((count == 0) ? "No more drywall walls to suggest." : $"Suggested artwork on {count} wall(s). Click a blue wall to take it off.");
+		return State((count == 0) ? "No more walls to suggest." : $"Suggested artwork on {count} wall(s). Click a blue wall to take it off.");
 	}
 
 	private List<FaceState> SuggestedFaces()
@@ -941,6 +1023,42 @@ internal class RevitStudioHost : IStudioHost
 		}
 		double freeMin = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
 		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && Allowed(f) && f.Face.U1 - f.Face.U0 >= freeMin));
+		return picks;
+	}
+
+	// Sugerencias por zona del cliente: General (pasillos/open office) varias por muro largo, Kitchen y Lounge 1-2,
+	// Meeting room 1 lejos de la TV, Reception 1 en el segundo mejor muro (el mejor queda para el logo)
+	private List<FaceState> ClientSuggestions()
+	{
+		List<FaceState> picks = new List<FaceState>();
+		double m15 = UnitUtils.ConvertToInternalUnits(1.5, UnitTypeId.Meters);
+		double m3 = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
+		foreach (IGrouping<long, FaceState> room in from f in _faces
+			where f.RoomId != 0 && Allowed(f) && !f.TvWall
+			group f by f.RoomId)
+		{
+			if (room.Any((FaceState f) => f.On) || WallRules.IsService(RoomName(_rooms[room.Key])))
+			{
+				continue;
+			}
+			List<FaceState> longest = room.OrderByDescending((FaceState f) => f.Face.U1 - f.Face.U0).ToList();
+			switch (ZoneOfRoom(room.Key))
+			{
+			case ArtZone.General:
+				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m3).Take(3));
+				break;
+			case ArtZone.Kitchen:
+				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(2));
+				break;
+			case ArtZone.Meeting:
+				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(IsTv(room.Key) ? 1 : 2));
+				break;
+			case ArtZone.Reception:
+				picks.AddRange(longest.Skip((longest.Count > 1) ? 1 : 0).Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(1));
+				break;
+			}
+		}
+		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && Allowed(f) && f.Face.U1 - f.Face.U0 >= m3));
 		return picks;
 	}
 
@@ -990,7 +1108,8 @@ internal class RevitStudioHost : IStudioHost
 			Allowed = Allowed(f),
 			Reason = Why(f),
 			Core = f.Core,
-			On = f.On,
+			TvWall = f.TvWall,
+			On = f.On || f.TvWall,
 			Suggested = f.Suggested,
 			Problem = _faceProblems.TryGetValue(f.Key, out var p) ? p : null
 		};

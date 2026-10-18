@@ -247,16 +247,20 @@ public class PlanView : FrameworkElement
 		{
 			return (f.Reason ?? "Nothing goes here") + ".";
 		}
-		bool tv = UseOf(f.RoomId) == RoomUse.Tv;
+		bool tvRoom = UseOf(f.RoomId) == RoomUse.Tv;
+		if (f.TvWall)
+		{
+			return "The TV is on this wall. Click the TV to move it.";
+		}
 		if (f.On && f.Problem != null)
 		{
 			return f.Problem + ". Click to take it off.";
 		}
 		if (f.On)
 		{
-			return tv ? "The TV is on this wall." : ((f.Suggested ? "Suggested. " : "") + "Artwork goes here. Click to take it off.");
+			return (f.Suggested ? "Suggested. " : "") + "Artwork goes here. Click to take it off.";
 		}
-		return tv ? "Click to move the TV here." : "Click to put artwork here.";
+		return tvRoom ? "Click to put artwork here; the TV stays on its wall." : "Click to put artwork here.";
 	}
 
 	private Point[] FaceLine(PlanFace f)
@@ -282,7 +286,7 @@ public class PlanView : FrameworkElement
 		}
 		else if (f.On)
 		{
-			pen = new Pen((UseOf(f.RoomId) == RoomUse.Tv) ? Theme.Dark : Theme.Accent, hot ? 4.5 : 3.0);
+			pen = new Pen(f.TvWall ? Theme.Dark : Theme.Accent, hot ? 4.5 : 3.0);
 		}
 		else
 		{

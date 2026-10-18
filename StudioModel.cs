@@ -32,6 +32,8 @@ public class PlanRoom
 
 	public string Collection;
 
+	public ArtZone? Zone;
+
 	public string Title => (Number.Length == 0) ? Name : (Name + " " + Number);
 }
 
@@ -117,6 +119,8 @@ public class PlanFace
 
 	public bool Core;
 
+	public bool TvWall;
+
 	public bool On;
 
 	public bool Suggested;
@@ -133,6 +137,10 @@ public class StudioRequest
 	public bool ArtInOffices;
 
 	public Dictionary<long, string> RoomCollections = new Dictionary<long, string>();
+
+	public string Client;
+
+	public Dictionary<long, ArtZone> RoomZones = new Dictionary<long, ArtZone>();
 
 	public List<long> ArtTypes = new List<long>();
 
@@ -178,6 +186,8 @@ public interface IStudioHost
 
 	List<ArtCollection> Collections { get; }
 
+	List<ClientBoard> Boards { get; }
+
 	string StartNote { get; }
 
 	Thumb Thumb(long typeId);
@@ -197,6 +207,8 @@ public interface IStudioHost
 	PreviewResult Suggest();
 
 	PreviewResult SetRoomCollection(long roomId, string collection);
+
+	PreviewResult SetRoomZone(long roomId, ArtZone? zone);
 }
 
 public class StudioSettings
@@ -228,4 +240,8 @@ public class StudioSettings
 	public string Collection;
 
 	public Dictionary<long, string> RoomCollections = new Dictionary<long, string>();
+
+	public string Client;
+
+	public Dictionary<long, ArtZone> RoomZones = new Dictionary<long, ArtZone>();
 }
