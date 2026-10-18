@@ -177,37 +177,78 @@ public class LayoutFit
 		}
 	}
 
-	// Prueba las 8 orientaciones; para cada una centra y afina el desplazamiento con el muro más cercano
+	// Para cada una de las 8 orientaciones: candidatos de desplazamiento emparejando bordes largos del JSON con muros
+	// de Revit de igual dirección y largo parecido; el que más puntos deja sobre muros gana y se afina.
+	// No centra los dos conjuntos, así que muros sueltos lejos del edificio no lo desvían.
 	public static LayoutFit Find(DesignLayout layout, List<Tuple<Point, Point>> revitWalls)
 	{
-		if (revitWalls.Count == 0)
+		List<Tuple<Point, Point>> walls = revitWalls.Where((Tuple<Point, Point> w) => (w.Item2 - w.Item1).Length >= 0.5).ToList();
+		if (walls.Count == 0)
 		{
 			return null;
 		}
-		List<Point> samples = Samples(layout);
+		List<Tuple<Point, Point>> jsonSegs = JsonSegments(layout);
+		List<Point> samples = Samples(jsonSegs);
 		if (samples.Count == 0)
 		{
 			return null;
 		}
-		Rect target = Bounds(revitWalls.SelectMany((Tuple<Point, Point> w) => new[] { w.Item1, w.Item2 }));
+		SegGrid grid = new SegGrid(walls, 3.0);
+		List<Point> probe = samples.Where((Point q, int i) => i % Math.Max(1, samples.Count / 300) == 0).ToList();
+		List<Tuple<Point, Point>> longest = jsonSegs.OrderByDescending((Tuple<Point, Point> j) => (j.Item2 - j.Item1).Length).Take(20).ToList();
 		LayoutFit best = null;
 		foreach (int rot in new[] { 0, 90, 180, 270 })
 		{
 			foreach (bool mirror in new[] { false, true })
 			{
 				LayoutFit fit = new LayoutFit { Rotation = rot, Mirror = mirror };
-				Rect placed = Bounds(samples.Select(fit.Apply));
-				fit.Offset = new Point(target.X + target.Width / 2.0, target.Y + target.Height / 2.0) - new Point(placed.X + placed.Width / 2.0, placed.Y + placed.Height / 2.0);
-				foreach (double tol in new[] { 8.0, 4.0, 2.0, 1.0, 1.0, 0.6 })
+				List<Vector> candidates = new List<Vector>();
+				foreach (Tuple<Point, Point> j in longest)
+				{
+					Point ja = fit.Apply(j.Item1);
+					Point jb = fit.Apply(j.Item2);
+					Vector dj = jb - ja;
+					double lj = dj.Length;
+					dj.Normalize();
+					Point jm = ja + (jb - ja) / 2.0;
+					foreach (Tuple<Point, Point> w in walls)
+					{
+						Vector dr = w.Item2 - w.Item1;
+						double lr = dr.Length;
+						dr.Normalize();
+						if (Math.Abs(Vector.CrossProduct(dj, dr)) > 0.05 || lr < lj * 0.5 || lr > lj * 2.0)
+						{
+							continue;
+						}
+						candidates.Add(w.Item1 + (w.Item2 - w.Item1) / 2.0 - jm);
+					}
+				}
+				if (candidates.Count == 0)
+				{
+					continue;
+				}
+				Vector bestT = candidates[0];
+				int bestHits = -1;
+				foreach (Vector t in candidates)
+				{
+					int hits = probe.Count((Point q) => grid.Nearest(fit.Apply(q) + t, 1.0).HasValue);
+					if (hits > bestHits)
+					{
+						bestHits = hits;
+						bestT = t;
+					}
+				}
+				fit.Offset = bestT;
+				foreach (double tol in new[] { 2.0, 1.0, 0.6, 0.6 })
 				{
 					List<Vector> pulls = new List<Vector>();
-					foreach (Point s in samples)
+					foreach (Point q in samples)
 					{
-						Point p = fit.Apply(s);
-						Point q = Nearest(revitWalls, p);
-						if ((q - p).Length <= tol)
+						Point at = fit.Apply(q);
+						Point? near = grid.Nearest(at, tol);
+						if (near.HasValue)
 						{
-							pulls.Add(q - p);
+							pulls.Add(near.Value - at);
 						}
 					}
 					if (pulls.Count == 0)
@@ -216,7 +257,7 @@ public class LayoutFit
 					}
 					fit.Offset += new Vector(Median(pulls.Select((Vector v) => v.X)), Median(pulls.Select((Vector v) => v.Y)));
 				}
-				fit.Score = samples.Count((Point s) => (Nearest(revitWalls, fit.Apply(s)) - fit.Apply(s)).Length <= 0.75) / (double)samples.Count;
+				fit.Score = samples.Count((Point q) => grid.Nearest(fit.Apply(q), 0.75).HasValue) / (double)samples.Count;
 				if (best == null || fit.Score > best.Score)
 				{
 					best = fit;
@@ -226,45 +267,106 @@ public class LayoutFit
 		return best;
 	}
 
-	// Puntos cada ~30 cm sobre los muros del JSON (o sobre los bordes de los rooms si no trae muros), 1500 como máximo
-	private static List<Point> Samples(DesignLayout layout)
+	// Los bordes de los rooms (siguen los tabiques) y los muros que traiga el JSON, en cm
+	private static List<Tuple<Point, Point>> JsonSegments(DesignLayout layout)
 	{
-		List<Tuple<Point, Point>> segs = layout.Walls.Where((Tuple<Point, Point> w) => (w.Item2 - w.Item1).Length >= 30.0).ToList();
-		if (segs.Count < 8)
-		{
-			segs.AddRange(layout.Rooms.SelectMany((LayoutRoom r) => r.Polygon.Select((Point p, int i) => Tuple.Create(p, r.Polygon[(i + 1) % r.Polygon.Length]))));
-		}
+		List<Tuple<Point, Point>> segs = layout.Rooms.SelectMany((LayoutRoom r) => r.Polygon.Select((Point q, int i) => Tuple.Create(q, r.Polygon[(i + 1) % r.Polygon.Length]))).ToList();
+		segs.AddRange(layout.Walls);
+		return segs.Where((Tuple<Point, Point> x) => (x.Item2 - x.Item1).Length >= 20.0).ToList();
+	}
+
+	// Puntos cada ~30 cm sobre esos segmentos, 1500 como máximo
+	private static List<Point> Samples(List<Tuple<Point, Point>> segs)
+	{
 		List<Point> pts = new List<Point>();
-		foreach (Tuple<Point, Point> s in segs)
+		foreach (Tuple<Point, Point> x in segs)
 		{
-			int n = Math.Max(1, (int)((s.Item2 - s.Item1).Length / 30.0));
+			int n = Math.Max(1, (int)((x.Item2 - x.Item1).Length / 30.0));
 			for (int i = 0; i <= n; i++)
 			{
-				pts.Add(s.Item1 + (s.Item2 - s.Item1) * (i / (double)n));
+				pts.Add(x.Item1 + (x.Item2 - x.Item1) * (i / (double)n));
 			}
 		}
 		int step = Math.Max(1, pts.Count / 1500);
-		return pts.Where((Point p, int i) => i % step == 0).ToList();
+		return pts.Where((Point q, int i) => i % step == 0).ToList();
 	}
 
-	private static Point Nearest(List<Tuple<Point, Point>> segs, Point p)
+	// Índice espacial de los muros de Revit para buscar el más cercano rápido
+	private class SegGrid
 	{
-		Point best = segs[0].Item1;
-		double bestD = double.MaxValue;
-		foreach (Tuple<Point, Point> s in segs)
+		private readonly List<Tuple<Point, Point>> _segs;
+
+		private readonly double _size;
+
+		private readonly Dictionary<long, List<int>> _cells = new Dictionary<long, List<int>>();
+
+		public SegGrid(List<Tuple<Point, Point>> segs, double size)
 		{
-			Vector ab = s.Item2 - s.Item1;
-			double len = ab.LengthSquared;
-			double t = (len < 1E-09) ? 0.0 : Math.Max(0.0, Math.Min(1.0, (p - s.Item1) * ab / len));
-			Point q = s.Item1 + ab * t;
-			double d = (q - p).LengthSquared;
-			if (d < bestD)
+			_segs = segs;
+			_size = size;
+			for (int i = 0; i < segs.Count; i++)
 			{
-				bestD = d;
-				best = q;
+				int x0 = Cell(Math.Min(segs[i].Item1.X, segs[i].Item2.X));
+				int x1 = Cell(Math.Max(segs[i].Item1.X, segs[i].Item2.X));
+				int y0 = Cell(Math.Min(segs[i].Item1.Y, segs[i].Item2.Y));
+				int y1 = Cell(Math.Max(segs[i].Item1.Y, segs[i].Item2.Y));
+				for (int x = x0; x <= x1; x++)
+				{
+					for (int y = y0; y <= y1; y++)
+					{
+						long k = Key(x, y);
+						if (!_cells.TryGetValue(k, out var list))
+						{
+							list = (_cells[k] = new List<int>());
+						}
+						list.Add(i);
+					}
+				}
 			}
 		}
-		return best;
+
+		private int Cell(double v)
+		{
+			return (int)Math.Floor(v / _size);
+		}
+
+		private static long Key(int x, int y)
+		{
+			return ((long)x << 32) | (uint)y;
+		}
+
+		public Point? Nearest(Point p, double maxD)
+		{
+			int r = (int)Math.Ceiling(maxD / _size);
+			int cx = Cell(p.X);
+			int cy = Cell(p.Y);
+			Point? best = null;
+			double bestD = maxD * maxD;
+			for (int x = cx - r; x <= cx + r; x++)
+			{
+				for (int y = cy - r; y <= cy + r; y++)
+				{
+					if (!_cells.TryGetValue(Key(x, y), out var list))
+					{
+						continue;
+					}
+					foreach (int i in list)
+					{
+						Vector ab = _segs[i].Item2 - _segs[i].Item1;
+						double len = ab.LengthSquared;
+						double t = (len < 1E-09) ? 0.0 : Math.Max(0.0, Math.Min(1.0, (p - _segs[i].Item1) * ab / len));
+						Point q = _segs[i].Item1 + ab * t;
+						double d = (q - p).LengthSquared;
+						if (d <= bestD)
+						{
+							bestD = d;
+							best = q;
+						}
+					}
+				}
+			}
+			return best;
+		}
 	}
 
 	private static double Median(IEnumerable<double> values)
@@ -273,11 +375,5 @@ public class LayoutFit
 		return (v.Count == 0) ? 0.0 : v[v.Count / 2];
 	}
 
-	private static Rect Bounds(IEnumerable<Point> pts)
-	{
-		List<Point> p = pts.ToList();
-		double x0 = p.Min((Point q) => q.X);
-		double y0 = p.Min((Point q) => q.Y);
-		return new Rect(x0, y0, p.Max((Point q) => q.X) - x0, p.Max((Point q) => q.Y) - y0);
-	}
+
 }

@@ -186,9 +186,20 @@ public class StudioWindow : Window
 		DockPanel.SetDock(footer, Dock.Bottom);
 		root.Children.Add(footer);
 		Border right = BuildInspector();
-		DockPanel.SetDock(right, Dock.Right);
-		root.Children.Add(right);
-		root.Children.Add(BuildPlanArea());
+		right.Width = double.NaN;
+		Grid body = new Grid();
+		body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.0, GridUnitType.Star), MinWidth = 320.0 });
+		body.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+		body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(380.0), MinWidth = 300.0 });
+		UIElement planArea = BuildPlanArea();
+		body.Children.Add(planArea);
+		// Arrastrar el divisor agranda o achica el plano
+		GridSplitter split = new GridSplitter { Width = 6.0, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = Brushes.Transparent, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeWE, ToolTip = "Drag to make the plan bigger or smaller" };
+		Grid.SetColumn(split, 1);
+		body.Children.Add(split);
+		Grid.SetColumn(right, 2);
+		body.Children.Add(right);
+		root.Children.Add(body);
 		Content = root;
 
 		foreach (PlanLevel level in host.Levels)
@@ -316,16 +327,17 @@ public class StudioWindow : Window
 			Margin = new Thickness(6.0, 0.0, 0.0, 0.0)
 		});
 		area.Children.Add(legend);
-		Button fit = new Button
-		{
-			Content = "Fit plan",
-			HorizontalAlignment = HorizontalAlignment.Right,
-			VerticalAlignment = VerticalAlignment.Top,
-			Margin = new Thickness(12.0),
-			Padding = new Thickness(12.0, 5.0, 12.0, 5.0)
-		};
+		StackPanel view = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(12.0) };
+		Button zoomOut = new Button { Content = "−", Width = 32.0, Padding = new Thickness(0.0, 5.0, 0.0, 5.0), ToolTip = "Zoom out" };
+		Button zoomIn = new Button { Content = "+", Width = 32.0, Padding = new Thickness(0.0, 5.0, 0.0, 5.0), Margin = new Thickness(4.0, 0.0, 0.0, 0.0), ToolTip = "Zoom in" };
+		Button fit = new Button { Content = "Fit plan", Margin = new Thickness(8.0, 0.0, 0.0, 0.0), Padding = new Thickness(12.0, 5.0, 12.0, 5.0) };
+		zoomOut.Click += (s, e) => _plan.ZoomBy(1.0 / 1.25);
+		zoomIn.Click += (s, e) => _plan.ZoomBy(1.25);
 		fit.Click += (s, e) => _plan.Fit();
-		area.Children.Add(fit);
+		view.Children.Add(zoomOut);
+		view.Children.Add(zoomIn);
+		view.Children.Add(fit);
+		area.Children.Add(view);
 		_actionBar.Child = _actionContent;
 		area.Children.Add(_actionBar);
 		return area;

@@ -402,6 +402,21 @@ internal class RevitStudioHost : IStudioHost
 			}
 		}
 		string file = System.IO.Path.GetFileName(layout.File);
+		try
+		{
+			string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "QbiqTools");
+			System.IO.Directory.CreateDirectory(dir);
+			List<string> lines = new List<string> { "json " + layout.File, "best level " + bestLevel + " score " + (best?.Score ?? 0.0) + " rot " + best?.Rotation + " mirror " + best?.Mirror + " offset " + best?.Offset };
+			foreach (Wall w in walls)
+			{
+				Line l = (Line)((LocationCurve)w.Location).Curve;
+				lines.Add($"{w.LevelId.Value} {l.GetEndPoint(0).X:F3} {l.GetEndPoint(0).Y:F3} {l.GetEndPoint(1).X:F3} {l.GetEndPoint(1).Y:F3} {w.Width:F3} {w.WallType.Kind}");
+			}
+			System.IO.File.WriteAllLines(System.IO.Path.Combine(dir, "layout_fit.txt"), lines);
+		}
+		catch
+		{
+		}
 		if (best == null || best.Score < 0.5)
 		{
 			LayoutNote = $"Couldn't line up {file} with the walls of any level ({Math.Round((best?.Score ?? 0.0) * 100.0)}% of its walls match), so Revit's rooms are used.";

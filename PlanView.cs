@@ -110,6 +110,15 @@ public class PlanView : FrameworkElement
 		InvalidateVisual();
 	}
 
+	public void ZoomBy(double factor)
+	{
+		Point c = new Point(ActualWidth / 2.0, ActualHeight / 2.0);
+		Point w = ToWorld(c);
+		_scale = Math.Max(0.5, Math.Min(400.0, _scale * factor));
+		_offset = new Vector(c.X - w.X * _scale, c.Y + w.Y * _scale);
+		InvalidateVisual();
+	}
+
 	public void Fit()
 	{
 		_fitted = false;
@@ -118,7 +127,8 @@ public class PlanView : FrameworkElement
 
 	private IEnumerable<Point> AllPoints()
 	{
-		return _level.Rooms.SelectMany((PlanRoom r) => r.Loops.SelectMany((Point[] l) => l)).Concat(_level.Walls.SelectMany((PlanWall w) => w.Path));
+		List<Point> rooms = _level.Rooms.SelectMany((PlanRoom r) => r.Loops.SelectMany((Point[] l) => l)).ToList();
+		return (rooms.Count > 0) ? rooms : _level.Walls.SelectMany((PlanWall w) => w.Path);
 	}
 
 	private void FitNow()
