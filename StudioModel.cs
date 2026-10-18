@@ -196,6 +196,8 @@ public interface IStudioHost
 
 	string StartNote { get; }
 
+	string LayoutNote { get; }
+
 	Thumb Thumb(long typeId);
 
 	double? ParseLength(string text);
@@ -256,4 +258,6 @@ public class StudioSettings
 	public string Client;
 
 	public Dictionary<long, ArtZone> RoomZones = new Dictionary<long, ArtZone>();
+
+	public Dictionary<string, string> Layouts = new Dictionary<string, string>();
 }

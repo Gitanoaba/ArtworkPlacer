@@ -117,6 +117,26 @@ internal class RevitStudioHost : IStudioHost
 
 	private readonly List<Room> _broken;
 
+	// Rooms del layout de Qbiq (JSON del diseño): ids negativos, mandan sobre los de Revit en su nivel
+	private class LayoutRoomInfo
+	{
+		public string Name;
+
+		public ElementId LevelId;
+
+		public List<XYZ> Polygon;
+	}
+
+	private readonly Dictionary<long, LayoutRoomInfo> _layoutRooms = new Dictionary<long, LayoutRoomInfo>();
+
+	private DesignLayout _layout;
+
+	private LayoutFit _fit;
+
+	private long _layoutLevel = -1;
+
+	public string LayoutNote { get; private set; }
+
 	private readonly Dictionary<long, List<FoundRoom>> _enclosures = new Dictionary<long, List<FoundRoom>>();
 
 	private readonly List<string> _notRebuilt = new List<string>();
@@ -167,7 +187,7 @@ internal class RevitStudioHost : IStudioHost
 
 	private const string ZoneKey = "zone:";
 
-	public RevitStudioHost(UIDocument uidoc, string revitVersion)
+	public RevitStudioHost(UIDocument uidoc, string revitVersion, DesignLayout layout = null)
 	{
 		_uidoc = uidoc;
 		_doc = uidoc.Document;
@@ -179,6 +199,10 @@ internal class RevitStudioHost : IStudioHost
 			select r).ToList();
 		_rooms = placed.Where((Room r) => r.Area > 0.0).ToDictionary((Room r) => r.Id.Value);
 		_broken = placed.Where((Room r) => r.Area <= 0.0).ToList();
+		if (layout != null)
+		{
+			FitLayout(layout);
+		}
 		Levels = BuildLevels();
 		long active = ((_doc.ActiveView as ViewPlan)?.GenLevel?.Id.Value).GetValueOrDefault(-1L);
 		StartLevel = Levels.Any((PlanLevel l) => l.Id == active) ? active : (Levels.FirstOrDefault()?.Id ?? -1);
@@ -219,8 +243,10 @@ internal class RevitStudioHost : IStudioHost
 		List<PlanLevel> result = new List<PlanLevel>();
 		foreach (Level level in levels)
 		{
-			List<Room> rooms = _rooms.Values.Where((Room r) => r.LevelId == level.Id).ToList();
 			List<Wall> onLevel = walls.Where((Wall w) => w.LevelId == level.Id).ToList();
+			List<long> layoutIds = (level.Id.Value == _layoutLevel) ? BuildLayoutRooms(level, onLevel) : new List<long>();
+			// En el nivel del layout, un room de Revit que cae dentro de un room del JSON queda reemplazado
+			List<Room> rooms = _rooms.Values.Where((Room r) => r.LevelId == level.Id && !InLayoutRoom(r)).ToList();
 			if (rooms.Count == 0 && onLevel.Count == 0)
 			{
 				continue;
@@ -231,7 +257,7 @@ internal class RevitStudioHost : IStudioHost
 			{
 				Id = level.Id.Value,
 				Name = level.Name,
-				Rooms = rooms.Select(ToPlan).Where((PlanRoom r) => r.Loops.Count > 0).Concat(adopted.Select(ToVirtualPlan)).ToList(),
+				Rooms = rooms.Select(ToPlan).Where((PlanRoom r) => r.Loops.Count > 0).Concat(adopted.Select(ToVirtualPlan)).Concat(layoutIds.Select(ToLayoutPlan)).ToList(),
 				Walls = onLevel.Select((Wall w) => new PlanWall
 				{
 					Path = ((LocationCurve)w.Location).Curve.Tessellate().Select((XYZ p) => new Point(p.X, p.Y)).ToArray(),
@@ -248,7 +274,7 @@ internal class RevitStudioHost : IStudioHost
 					select d).ToList()
 			};
 			result.Add(plan);
-			AddFaces(level, rooms, adopted, onLevel.Where(Usable).ToList());
+			AddFaces(level, rooms, adopted, layoutIds, onLevel.Where(Usable).ToList());
 		}
 		return result;
 	}
@@ -276,7 +302,7 @@ internal class RevitStudioHost : IStudioHost
 		List<XYZ> healthy = rooms.Select((Room r) => (r.Location as LocationPoint)?.Point).Where((XYZ p) => p != null).ToList();
 		List<Room> adopted = new List<Room>();
 		HashSet<FoundRoom> taken = new HashSet<FoundRoom>();
-		foreach (Room room in broken)
+		foreach (Room room in broken.Where((Room r) => !InLayoutRoom(r)))
 		{
 			XYZ at = ((LocationPoint)room.Location).Point;
 			FoundRoom enclosure = found.FirstOrDefault((FoundRoom f) => Contains(f.Polygon, at));
@@ -344,6 +370,156 @@ internal class RevitStudioHost : IStudioHost
 			}).ToList();
 	}
 
+	private bool HasRoom(long roomId)
+	{
+		return _rooms.ContainsKey(roomId) || _layoutRooms.ContainsKey(roomId);
+	}
+
+	private string NameOf(long roomId)
+	{
+		return _layoutRooms.TryGetValue(roomId, out var l) ? l.Name : RoomName(_rooms[roomId]);
+	}
+
+	private ElementId LevelOf(long roomId)
+	{
+		return _layoutRooms.TryGetValue(roomId, out var l) ? l.LevelId : _rooms[roomId].LevelId;
+	}
+
+	// Alinea el JSON con los muros de cada nivel y se queda con el que mejor calza
+	private void FitLayout(DesignLayout layout)
+	{
+		List<Wall> walls = new FilteredElementCollector(_doc).OfClass(typeof(Wall)).Cast<Wall>().Where((Wall w) => w.Location is LocationCurve { Curve: Line }).ToList();
+		LayoutFit best = null;
+		long bestLevel = -1;
+		foreach (IGrouping<long, Wall> g in walls.GroupBy((Wall w) => w.LevelId.Value))
+		{
+			List<Tuple<Point, Point>> segs = g.Select((Wall w) => (Line)((LocationCurve)w.Location).Curve).Select((Line l) => Tuple.Create(new Point(l.GetEndPoint(0).X, l.GetEndPoint(0).Y), new Point(l.GetEndPoint(1).X, l.GetEndPoint(1).Y))).ToList();
+			LayoutFit fit = LayoutFit.Find(layout, segs);
+			if (fit != null && (best == null || fit.Score > best.Score))
+			{
+				best = fit;
+				bestLevel = g.Key;
+			}
+		}
+		string file = System.IO.Path.GetFileName(layout.File);
+		if (best == null || best.Score < 0.5)
+		{
+			LayoutNote = $"Couldn't line up {file} with the walls of any level ({Math.Round((best?.Score ?? 0.0) * 100.0)}% of its walls match), so Revit's rooms are used.";
+			return;
+		}
+		_layout = layout;
+		_fit = best;
+		_layoutLevel = bestLevel;
+		string levelName = (_doc.GetElement(new ElementId(bestLevel)) as Level)?.Name ?? "";
+		LayoutNote = $"Rooms from {file} on {levelName}: {layout.Rooms.Count} rooms, {Math.Round(best.Score * 100.0)}% of its walls line up with the model.";
+	}
+
+	private bool InLayoutRoom(Room r)
+	{
+		if (_fit == null || r.LevelId.Value != _layoutLevel || !(r.Location is LocationPoint lp))
+		{
+			return false;
+		}
+		return _layoutRooms.Values.Any((LayoutRoomInfo l) => Contains(l.Polygon, lp.Point));
+	}
+
+	// Cada room del JSON: su polígono en el modelo y los muros de Revit que siguen sus bordes
+	private List<long> BuildLayoutRooms(Level level, List<Wall> onLevel)
+	{
+		List<long> ids = new List<long>();
+		List<Wall> straight = onLevel.Where((Wall w) => w.Location is LocationCurve { Curve: Line }).ToList();
+		for (int i = 0; i < _layout.Rooms.Count; i++)
+		{
+			LayoutRoom lr = _layout.Rooms[i];
+			List<XYZ> poly = lr.Polygon.Select((Point p) => _fit.Apply(p)).Select((Point p) => new XYZ(p.X, p.Y, 0.0)).ToList();
+			long id = -1000L - i;
+			FoundRoom found = new FoundRoom { LevelId = level.Id, Polygon = poly, Area = Math.Abs(SignedArea(poly)) };
+			found.Walls.AddRange(EdgeWalls(poly, straight));
+			_layoutRooms[id] = new LayoutRoomInfo { Name = lr.Name, LevelId = level.Id, Polygon = poly };
+			_virtual[id] = found;
+			ids.Add(id);
+		}
+		return ids;
+	}
+
+	private static double SignedArea(List<XYZ> poly)
+	{
+		double a = 0.0;
+		for (int i = 0; i < poly.Count; i++)
+		{
+			XYZ p = poly[i];
+			XYZ q = poly[(i + 1) % poly.Count];
+			a += p.X * q.Y - q.X * p.Y;
+		}
+		return a / 2.0;
+	}
+
+	// Un muro sigue un borde si es paralelo, está a menos de medio grosor + 15 cm y se solapan al menos 10 cm
+	private static IEnumerable<RoomWall> EdgeWalls(List<XYZ> poly, List<Wall> walls)
+	{
+		for (int i = 0; i < poly.Count; i++)
+		{
+			XYZ a = poly[i];
+			XYZ b = poly[(i + 1) % poly.Count];
+			XYZ e = b - a;
+			if (e.GetLength() < 0.3)
+			{
+				continue;
+			}
+			XYZ ed = e.Normalize();
+			XYZ mid = (a + b) / 2.0;
+			foreach (Wall w in walls)
+			{
+				Line line = (Line)((LocationCurve)w.Location).Curve;
+				XYZ p0 = RoomFinder.Flat(line.GetEndPoint(0));
+				XYZ d = RoomFinder.Flat(line.Direction).Normalize();
+				if (Math.Abs(d.X * ed.Y - d.Y * ed.X) > 0.09)
+				{
+					continue;
+				}
+				XYZ n = new XYZ(0.0 - d.Y, d.X, 0.0);
+				if (Math.Abs((mid - p0).DotProduct(n)) > w.Width / 2.0 + 0.5)
+				{
+					continue;
+				}
+				double ua = (a - p0).DotProduct(d);
+				double ub = (b - p0).DotProduct(d);
+				double u0 = Math.Max(0.0, Math.Min(ua, ub));
+				double u1 = Math.Min(line.Length, Math.Max(ua, ub));
+				if (u1 - u0 < 0.33)
+				{
+					continue;
+				}
+				XYZ inside = mid + RoomFinder.Flat(w.Orientation) * (w.Width / 2.0 + 0.6);
+				int sign = Contains(poly, inside) ? 1 : (-1);
+				yield return new RoomWall
+				{
+					Wall = w,
+					Sign = sign,
+					U0 = u0,
+					U1 = u1,
+					A = p0 + d * u0,
+					B = p0 + d * u1
+				};
+			}
+		}
+	}
+
+	private PlanRoom ToLayoutPlan(long id)
+	{
+		LayoutRoomInfo l = _layoutRooms[id];
+		FoundRoom found = _virtual[id];
+		return new PlanRoom
+		{
+			Id = id,
+			Name = l.Name,
+			Number = "",
+			AreaText = UnitFormatUtils.Format(_units, SpecTypeId.Area, found.Area, forEditing: false) + ", from the design JSON",
+			Loops = new List<Point[]> { l.Polygon.Select((XYZ p) => new Point(p.X, p.Y)).ToArray() },
+			Label = new Point(l.Polygon.Average((XYZ p) => p.X), l.Polygon.Average((XYZ p) => p.Y))
+		};
+	}
+
 	private double AreaOf(long roomId)
 	{
 		return _virtual.TryGetValue(roomId, out var found) ? found.Area : _rooms[roomId].Area;
@@ -383,14 +559,16 @@ internal class RevitStudioHost : IStudioHost
 		};
 	}
 
-	private void AddFaces(Level level, List<Room> rooms, List<Room> adopted, List<Wall> walls)
+	private void AddFaces(Level level, List<Room> rooms, List<Room> adopted, List<long> layoutIds, List<Wall> walls)
 	{
 		List<FaceState> roomFaces = (from r in rooms
 			from f in RoomScope.Faces(r, _boundary)
 			where Usable(f.Wall)
 			select NewFace(level, r.Id.Value, f)).Concat(from r in adopted
 			from f in VirtualFaces(_virtual[r.Id.Value])
-			select NewFace(level, r.Id.Value, f)).ToList();
+			select NewFace(level, r.Id.Value, f)).Concat(from id in layoutIds
+			from f in VirtualFaces(_virtual[id])
+			select NewFace(level, id, f)).ToList();
 		_faces.AddRange(roomFaces);
 		foreach (Wall wall in walls)
 		{
@@ -607,11 +785,11 @@ internal class RevitStudioHost : IStudioHost
 	// Oficinas privadas y salas de servicio no llevan arte, salvo que el usuario elija Artwork para ese room
 	private string RoomBlock(long roomId)
 	{
-		if (roomId == 0 || _artRooms.Contains(roomId) || !_rooms.ContainsKey(roomId))
+		if (roomId == 0 || _artRooms.Contains(roomId) || !HasRoom(roomId))
 		{
 			return null;
 		}
-		string name = RoomName(_rooms[roomId]);
+		string name = NameOf(roomId);
 		if (WallRules.IsService(name))
 		{
 			return "No artwork in restrooms, storage or service rooms";
@@ -641,7 +819,7 @@ internal class RevitStudioHost : IStudioHost
 		{
 			return z;
 		}
-		ArtZone auto = ClientBoards.ZoneOf(RoomName(_rooms[roomId]));
+		ArtZone auto = ClientBoards.ZoneOf(NameOf(roomId));
 		return (auto == ArtZone.None && _artRooms.Contains(roomId)) ? ArtZone.General : auto;
 	}
 
@@ -760,7 +938,7 @@ internal class RevitStudioHost : IStudioHost
 		_req = req;
 		if (!_started)
 		{
-			foreach (KeyValuePair<long, RoomUse> kv in req.Uses.Where((KeyValuePair<long, RoomUse> kv) => kv.Value == RoomUse.Tv && _rooms.ContainsKey(kv.Key)))
+			foreach (KeyValuePair<long, RoomUse> kv in req.Uses.Where((KeyValuePair<long, RoomUse> kv) => kv.Value == RoomUse.Tv && HasRoom(kv.Key)))
 			{
 				_uses[kv.Key] = RoomUse.Tv;
 			}
@@ -768,7 +946,7 @@ internal class RevitStudioHost : IStudioHost
 			{
 				_roomCollection[kv.Key] = kv.Value;
 			}
-			foreach (KeyValuePair<long, ArtZone> kv in req.RoomZones.Where((KeyValuePair<long, ArtZone> kv) => _rooms.ContainsKey(kv.Key)))
+			foreach (KeyValuePair<long, ArtZone> kv in req.RoomZones.Where((KeyValuePair<long, ArtZone> kv) => HasRoom(kv.Key)))
 			{
 				_roomZone[kv.Key] = kv.Value;
 			}
@@ -1079,7 +1257,7 @@ internal class RevitStudioHost : IStudioHost
 		{
 			return new PreviewResult { Message = "Fix the settings on the right first." };
 		}
-		List<long> ids = roomIds.Where(_rooms.ContainsKey).ToList();
+		List<long> ids = roomIds.Where(HasRoom).ToList();
 		List<string> empty = new List<string>();
 		InTransaction(delegate
 		{
@@ -1117,7 +1295,7 @@ internal class RevitStudioHost : IStudioHost
 				});
 				if (use == RoomUse.Artwork && !faces.Any((FaceState f) => f.On))
 				{
-					empty.Add(RoomName(_rooms[id]));
+					empty.Add(NameOf(id));
 				}
 			}
 			touched.GroupBy((Wall w) => w.Id).Select((IGrouping<ElementId, Wall> g) => g.First()).ToList().ForEach(ReplanWall);
@@ -1210,8 +1388,7 @@ internal class RevitStudioHost : IStudioHost
 			where f.RoomId != 0 && Allowed(f) && !IsTv(f.RoomId)
 			group f by f.RoomId)
 		{
-			Room r = _rooms[room.Key];
-			string name = RoomName(r);
+			string name = NameOf(room.Key);
 			double m2 = UnitUtils.ConvertFromInternalUnits(AreaOf(room.Key), UnitTypeId.SquareMeters);
 			bool open = Has(name, OpenWords);
 			if (WallRules.IsService(name) || (m2 < 8.0 && !open) || room.Any((FaceState f) => f.On))
@@ -1238,7 +1415,7 @@ internal class RevitStudioHost : IStudioHost
 			where f.RoomId != 0 && Allowed(f) && !f.TvWall
 			group f by f.RoomId)
 		{
-			if (room.Any((FaceState f) => f.On) || WallRules.IsService(RoomName(_rooms[room.Key])))
+			if (room.Any((FaceState f) => f.On) || WallRules.IsService(NameOf(room.Key)))
 			{
 				continue;
 			}
@@ -1304,7 +1481,7 @@ internal class RevitStudioHost : IStudioHost
 			A = new Point(f.Face.A.X, f.Face.A.Y),
 			B = new Point(f.Face.B.X, f.Face.B.Y),
 			Normal = new Vector(f.Face.Normal.X, f.Face.Normal.Y),
-			Title = (f.RoomId != 0) ? $"{side} wall of {RoomName(_rooms[f.RoomId])}, {length}" : (f.Unroomed ? $"Wall of a closed space with no room in Revit, {length}" : $"Wall with no room, {length}"),
+			Title = (f.RoomId != 0) ? $"{side} wall of {NameOf(f.RoomId)}, {length}" : (f.Unroomed ? $"Wall of a closed space with no room in Revit, {length}" : $"Wall with no room, {length}"),
 			WallType = f.Face.Wall.WallType.Name,
 			Allowed = Allowed(f),
 			Reason = Why(f),
@@ -1350,7 +1527,7 @@ internal class RevitStudioHost : IStudioHost
 		return new PlanMarker
 		{
 			Key = -(int)roomId,
-			LevelId = _rooms[roomId].LevelId.Value,
+			LevelId = LevelOf(roomId).Value,
 			RoomId = roomId,
 			Use = RoomUse.Tv,
 			Center = new Point(spot.OnFace.X, spot.OnFace.Y),
@@ -1393,11 +1570,11 @@ internal class RevitStudioHost : IStudioHost
 			Activate(AllSymbols());
 			foreach (KeyValuePair<long, TvTarget> p in _tvPlans.Where((KeyValuePair<long, TvTarget> p) => p.Value.Chosen != null))
 			{
-				Try(RoomName(_rooms[p.Key]), () => _tvPlacer.Place(p.Value.Chosen, out var reason) ?? Fail(reason), ref tvs);
+				Try(NameOf(p.Key), () => _tvPlacer.Place(p.Value.Chosen, out var reason) ?? Fail(reason), ref tvs);
 			}
 			foreach (ArtPlan a in _artPlans.Where((ArtPlan a) => !skipped.Contains(a.Key)))
 			{
-				string label = (a.Face.RoomId != 0) ? RoomName(_rooms[a.Face.RoomId]) : PlaceArtworkCommand.WallLabel(a.Piece.Wall);
+				string label = (a.Face.RoomId != 0) ? NameOf(a.Face.RoomId) : PlaceArtworkCommand.WallLabel(a.Piece.Wall);
 				Try(label, () => a.Placer.PlacePiece(a.Piece, out var reason) ?? Fail(reason), ref arts);
 			}
 			status = t.Commit();

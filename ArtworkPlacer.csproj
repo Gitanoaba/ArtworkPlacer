@@ -12,6 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Reference Include="System.Web.Extensions" />
     <!-- Local build: use Revit installation -->
     <Reference Condition="Exists('C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll')" Include="RevitAPI">
       <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll</HintPath>

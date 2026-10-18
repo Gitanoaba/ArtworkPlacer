@@ -44,7 +44,7 @@ internal static class ClientBoards
 
 	private static readonly string[] ReceptionWords = { "reception", "lobby", "entrance", "entry", "welcome", "front desk", "קבלה", "לובי" };
 
-	private static readonly string[] MeetingWords = { "meeting", "conference", "boardroom", "board room", "lounge", "club", "ישיבות" };
+	private static readonly string[] MeetingWords = { "meeting", "conference", "boardroom", "board room", "lounge", "club", "comfort", "collaboration", "ישיבות" };
 
 	private static readonly string[] KitchenWords = { "kitchen", "pantry", "cafe", "café", "canteen", "coffee", "break", "מטבח" };
 

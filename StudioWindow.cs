@@ -57,6 +57,11 @@ public class StudioWindow : Window
 
 	private readonly ComboBox _clientBox = new ComboBox();
 
+	// Pedidos que reabren Room Studio con otros rooms: un JSON del diseño, o volver a los de Revit
+	public string RequestedLayout { get; private set; }
+
+	public bool RequestedRevitRooms { get; private set; }
+
 	// Barra grande sobre el plano con lo que se puede hacer con los rooms seleccionados
 	private readonly Border _actionBar = new Border
 	{
@@ -155,6 +160,20 @@ public class StudioWindow : Window
 		StackPanel levelPick = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 		levelPick.Children.Add(new TextBlock { Text = "Level", Foreground = Theme.Muted, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0.0, 0.0, 10.0, 0.0) });
 		levelPick.Children.Add(_levelBox);
+		Button json = new Button { Content = (host.LayoutNote != null && host.LayoutNote.StartsWith("Rooms from")) ? "Other design JSON…" : "Load design JSON…", Margin = new Thickness(16.0, 0.0, 0.0, 0.0), Padding = new Thickness(12.0, 5.0, 12.0, 5.0), ToolTip = "Use the rooms from the design's JSON (downloaded from the Qbiq platform) instead of Revit's rooms" };
+		json.Click += (s, e) => LoadLayout();
+		levelPick.Children.Add(json);
+		if (host.LayoutNote != null && host.LayoutNote.StartsWith("Rooms from"))
+		{
+			Button revit = new Button { Content = "Use Revit rooms", Style = Theme.Get("Link"), Margin = new Thickness(8.0, 0.0, 0.0, 0.0), VerticalAlignment = VerticalAlignment.Center };
+			revit.Click += (s, e) =>
+			{
+				RequestedRevitRooms = true;
+				DialogResult = false;
+				Close();
+			};
+			levelPick.Children.Add(revit);
+		}
 		Grid.SetColumn(levelPick, 2);
 		headerGrid.Children.Add(levelPick);
 		DockPanel.SetDock(header, Dock.Top);
@@ -494,9 +513,18 @@ public class StudioWindow : Window
 		{
 			Run(() => _host.Suggest());
 		}
-		if (_host.StartNote != null)
+		string notes = string.Join(" ", new[] { _host.LayoutNote, _host.StartNote }.Where((string n) => n != null));
+		if (notes.Length > 0)
 		{
-			Problem(_host.StartNote);
+			if (_host.LayoutNote != null && _host.LayoutNote.StartsWith("Rooms from") && _host.StartNote == null)
+			{
+				_status.Foreground = Theme.Muted;
+				_status.Text = notes;
+			}
+			else
+			{
+				Problem(notes);
+			}
 		}
 	}
 
@@ -882,6 +910,23 @@ public class StudioWindow : Window
 			Later();
 		});
 		return row;
+	}
+
+	private void LoadLayout()
+	{
+		OpenFileDialog dlg = new OpenFileDialog
+		{
+			Filter = "Qbiq design JSON (*.json)|*.json",
+			Title = "Load the design JSON",
+			InitialDirectory = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
+		};
+		if (dlg.ShowDialog(this) != true)
+		{
+			return;
+		}
+		RequestedLayout = dlg.FileName;
+		DialogResult = false;
+		Close();
 	}
 
 	private void LoadFamilies()
