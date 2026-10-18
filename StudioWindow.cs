@@ -57,6 +57,21 @@ public class StudioWindow : Window
 
 	private readonly ComboBox _clientBox = new ComboBox();
 
+	// Barra grande sobre el plano con lo que se puede hacer con los rooms seleccionados
+	private readonly Border _actionBar = new Border
+	{
+		HorizontalAlignment = HorizontalAlignment.Center,
+		VerticalAlignment = VerticalAlignment.Top,
+		Margin = new Thickness(0.0, 14.0, 0.0, 0.0),
+		Padding = new Thickness(14.0, 10.0, 14.0, 10.0),
+		CornerRadius = new CornerRadius(12.0),
+		BorderThickness = new Thickness(1.0),
+		Visibility = Visibility.Collapsed,
+		Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18.0, ShadowDepth = 2.0, Opacity = 0.18 }
+	};
+
+	private readonly StackPanel _actionContent = new StackPanel { Orientation = Orientation.Horizontal };
+
 	private readonly TextBlock _clientNote = new TextBlock { Foreground = Theme.Muted, FontSize = 12.0, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0.0, 4.0, 0.0, 0.0) };
 
 	private UIElement _collectionField;
@@ -96,6 +111,7 @@ public class StudioWindow : Window
 		Height = Math.Min(880.0, SystemParameters.WorkArea.Height - 40.0);
 		MinWidth = 960.0;
 		MinHeight = 620.0;
+		WindowState = WindowState.Maximized;
 		WindowStartupLocation = WindowStartupLocation.CenterScreen;
 		Theme.Apply(this);
 		_alignBox = ArtworkDialog.NewAlignBox(settings.Align, includeFamilyDefault: true);
@@ -211,6 +227,9 @@ public class StudioWindow : Window
 		ShowPlan();
 		_summary.Text = "Planning…";
 		Loaded += (s, e) => Dispatcher.BeginInvoke(DispatcherPriority.Background, (Action)Start);
+		_actionBar.Background = Theme.Panel;
+		_actionBar.BorderBrush = Theme.Line;
+		PreviewKeyDown += OnKey;
 	}
 
 	// Elegir una sección Artwork_* marca exactamente sus tipos, como en Place Artwork
@@ -287,6 +306,8 @@ public class StudioWindow : Window
 		};
 		fit.Click += (s, e) => _plan.Fit();
 		area.Children.Add(fit);
+		_actionBar.Child = _actionContent;
+		area.Children.Add(_actionBar);
 		return area;
 	}
 
@@ -353,7 +374,7 @@ public class StudioWindow : Window
 		stack.Children.Add(_autoSize);
 		return new Border
 		{
-			Width = 340.0,
+			Width = 380.0,
 			Background = Theme.Panel,
 			BorderBrush = Theme.Line,
 			BorderThickness = new Thickness(1.0, 0.0, 0.0, 0.0),
@@ -556,8 +577,96 @@ public class StudioWindow : Window
 		ShowPlan();
 	}
 
+	// A = Artwork, T = TV, N = Nothing para los rooms seleccionados; Esc deselecciona; F encuadra el plano
+	private void OnKey(object sender, KeyEventArgs e)
+	{
+		if (Keyboard.FocusedElement is TextBox || Keyboard.FocusedElement is ComboBox || Keyboard.FocusedElement is ComboBoxItem)
+		{
+			return;
+		}
+		List<PlanRoom> sel = Selected;
+		switch (e.Key)
+		{
+		case Key.A:
+		case Key.T:
+		case Key.N:
+			if (sel.Count > 0)
+			{
+				RoomUse use = (e.Key == Key.A) ? RoomUse.Artwork : ((e.Key == Key.T) ? RoomUse.Tv : RoomUse.None);
+				Run(() => _host.SetRoomUse(sel.Select((PlanRoom r) => r.Id).ToList(), use));
+				e.Handled = true;
+			}
+			break;
+		case Key.Escape:
+			if (sel.Count > 0)
+			{
+				Select(null, add: false);
+				e.Handled = true;
+			}
+			break;
+		case Key.F:
+			_plan.Fit();
+			e.Handled = true;
+			break;
+		}
+	}
+
+	private void RefreshActionBar()
+	{
+		_actionContent.Children.Clear();
+		List<PlanRoom> sel = (_level == null) ? new List<PlanRoom>() : Selected;
+		_actionBar.Visibility = (sel.Count == 0) ? Visibility.Collapsed : Visibility.Visible;
+		if (sel.Count == 0)
+		{
+			return;
+		}
+		StackPanel title = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0.0, 0.0, 18.0, 0.0), MaxWidth = 260.0 };
+		title.Children.Add(new TextBlock { Text = (sel.Count == 1) ? sel[0].Title : $"{sel.Count} rooms", FontSize = 16.0, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+		title.Children.Add(new TextBlock { Text = "Keys: A artwork · T TV · N nothing · Esc", FontSize = 11.5, Foreground = Theme.Muted });
+		_actionContent.Children.Add(title);
+		RoomUse? common = (sel.Select((PlanRoom r) => r.Use).Distinct().Count() == 1) ? new RoomUse?(sel[0].Use) : null;
+		string[] labels = { "Nothing", "Artwork", "TV" };
+		for (int i = 0; i < 3; i++)
+		{
+			RoomUse use = (RoomUse)i;
+			Button b = new Button
+			{
+				Content = labels[i],
+				FontSize = 15.0,
+				MinWidth = 104.0,
+				Height = 40.0,
+				Margin = new Thickness(4.0, 0.0, 0.0, 0.0),
+				FontWeight = (common == use) ? FontWeights.SemiBold : FontWeights.Normal,
+				Background = (common == use) ? Theme.AccentSoft : Theme.Panel,
+				BorderBrush = (common == use) ? Theme.Accent : Theme.LineStrong
+			};
+			b.Click += (s, e) => Run(() => _host.SetRoomUse(Selected.Select((PlanRoom r) => r.Id).ToList(), use));
+			_actionContent.Children.Add(b);
+		}
+		if (sel.Count == 1 && SelectedClient != null)
+		{
+			PlanRoom room = sel[0];
+			ArtZone auto = ClientBoards.ZoneOf(room.Name);
+			ComboBox zone = new ComboBox { FontSize = 14.0, Height = 40.0, MinWidth = 200.0, Margin = new Thickness(14.0, 0.0, 0.0, 0.0), VerticalContentAlignment = VerticalAlignment.Center };
+			zone.Items.Add("Zone: auto (" + ZoneLabels[(int)auto].Split(':')[0] + ")");
+			foreach (string label in ZoneLabels)
+			{
+				zone.Items.Add("Zone: " + label.Split(':')[0]);
+			}
+			zone.SelectedIndex = room.Zone.HasValue ? ((int)room.Zone.Value + 1) : 0;
+			zone.SelectionChanged += (s, e) =>
+			{
+				ArtZone? z = (zone.SelectedIndex > 0) ? new ArtZone?((ArtZone)(zone.SelectedIndex - 1)) : null;
+				room.Zone = z;
+				Run(() => _host.SetRoomZone(room.Id, z));
+			};
+			_actionContent.Children.Add(zone);
+		}
+	}
+
 	private void RefreshSelection()
 	{
+		RefreshActionBar();
 		_selection.Children.Clear();
 		List<PlanRoom> sel = Selected;
 		if (sel.Count == 0)

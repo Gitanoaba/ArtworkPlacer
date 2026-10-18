@@ -24,6 +24,8 @@ public class PlanView : FrameworkElement
 
 	private static readonly Pen ProblemPen = Freeze(new Pen(Theme.Danger, 1.5) { DashStyle = new DashStyle(new double[] { 3, 2 }, 0), LineJoin = PenLineJoin.Round });
 
+	private static readonly Pen SeparatorPen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(160, 166, 176))), 1.2) { DashStyle = new DashStyle(new double[] { 4, 3 }, 0) });
+
 	private static readonly Pen SkippedPen = Freeze(new Pen(Theme.Muted, 1.5) { DashStyle = new DashStyle(new double[] { 2, 2 }, 0) });
 
 	private static readonly Typeface Regular = new Typeface(Theme.Font, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
@@ -32,7 +34,7 @@ public class PlanView : FrameworkElement
 
 	private PlanLevel _level;
 
-	private static readonly Pen OpenFacePen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(147, 176, 255))), 2.0) { DashStyle = new DashStyle(new double[] { 2.5, 1.5 }, 0), StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat });
+	private static readonly Pen OpenFacePen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(147, 176, 255))), 3.0) { DashStyle = new DashStyle(new double[] { 2.0, 1.2 }, 0), StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat });
 
 	private static readonly Pen BlockedFacePen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(196, 200, 207))), 1.5) { DashStyle = new DashStyle(new double[] { 1, 2 }, 0) });
 
@@ -115,7 +117,7 @@ public class PlanView : FrameworkElement
 		}
 		double x0 = pts.Min((Point p) => p.X), x1 = pts.Max((Point p) => p.X);
 		double y0 = pts.Min((Point p) => p.Y), y1 = pts.Max((Point p) => p.Y);
-		double pad = 36.0;
+		double pad = 18.0;
 		_scale = Math.Min((ActualWidth - pad * 2.0) / Math.Max(1.0, x1 - x0), (ActualHeight - pad * 2.0) / Math.Max(1.0, y1 - y0));
 		_offset = new Vector(ActualWidth / 2.0 - (x0 + x1) / 2.0 * _scale, ActualHeight / 2.0 + (y0 + y1) / 2.0 * _scale);
 		_fitted = true;
@@ -165,7 +167,7 @@ public class PlanView : FrameworkElement
 		}
 		foreach (PlanWall wall in _level.Walls.Where((PlanWall w) => w.Path.Length > 1))
 		{
-			Pen pen = new Pen(WallBrush, Math.Max(1.5, wall.Thickness * _scale)) { StartLineCap = PenLineCap.Square, EndLineCap = PenLineCap.Square, LineJoin = PenLineJoin.Miter };
+			Pen pen = wall.Separator ? SeparatorPen : new Pen(WallBrush, Math.Max(1.5, wall.Thickness * _scale)) { StartLineCap = PenLineCap.Square, EndLineCap = PenLineCap.Square, LineJoin = PenLineJoin.Miter };
 			StreamGeometry g = new StreamGeometry();
 			using (StreamGeometryContext ctx = g.Open())
 			{
@@ -282,15 +284,15 @@ public class PlanView : FrameworkElement
 		}
 		else if (f.On && f.Problem != null)
 		{
-			pen = new Pen(Theme.Danger, hot ? 4.5 : 3.0);
+			pen = new Pen(Theme.Danger, hot ? 6.5 : 4.5);
 		}
 		else if (f.On)
 		{
-			pen = new Pen(f.TvWall ? Theme.Dark : Theme.Accent, hot ? 4.5 : 3.0);
+			pen = new Pen(f.TvWall ? Theme.Dark : Theme.Accent, hot ? 6.5 : 4.5);
 		}
 		else
 		{
-			pen = hot ? new Pen(Theme.Accent, 3.0) : OpenFacePen;
+			pen = hot ? new Pen(Theme.Accent, 5.0) : OpenFacePen;
 		}
 		dc.DrawLine(pen, l[0], l[1]);
 	}
@@ -408,7 +410,7 @@ public class PlanView : FrameworkElement
 			return null;
 		}
 		PlanMarker best = null;
-		double bestD = 8.0;
+		double bestD = 13.0;
 		foreach (PlanMarker m in _markers.Where((PlanMarker m) => m.LevelId == _level.Id))
 		{
 			Vector along = m.Along;
@@ -517,7 +519,7 @@ public class PlanView : FrameworkElement
 			where f.LevelId == _level.Id
 			let l = FaceLine(f)
 			let d = DistanceToSegment(screen, l[0], l[1])
-			where d < 6.0
+			where d < 11.0
 			orderby f.Allowed descending, d
 			select f).FirstOrDefault();
 	}

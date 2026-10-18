@@ -203,6 +203,7 @@ internal class RevitStudioHost : IStudioHost
 		List<Wall> walls = new FilteredElementCollector(_doc).OfClass(typeof(Wall)).Cast<Wall>().Where((Wall w) => w.Location is LocationCurve).ToList();
 		List<Level> levels = new FilteredElementCollector(_doc).OfClass(typeof(Level)).Cast<Level>().OrderBy((Level l) => l.Elevation).ToList();
 		List<FamilyInstance> doors = new FilteredElementCollector(_doc).OfCategory(BuiltInCategory.OST_Doors).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().ToList();
+		List<CurveElement> separators = new FilteredElementCollector(_doc).OfCategory(BuiltInCategory.OST_RoomSeparationLines).WhereElementIsNotElementType().OfType<CurveElement>().ToList();
 		List<PlanLevel> result = new List<PlanLevel>();
 		foreach (Level level in levels)
 		{
@@ -212,7 +213,8 @@ internal class RevitStudioHost : IStudioHost
 			{
 				continue;
 			}
-			List<Room> adopted = AdoptBroken(level, rooms, onLevel);
+			List<Line> seps = SeparatorsOn(separators, level);
+			List<Room> adopted = AdoptBroken(level, rooms, onLevel, seps);
 			PlanLevel plan = new PlanLevel
 			{
 				Id = level.Id.Value,
@@ -222,7 +224,11 @@ internal class RevitStudioHost : IStudioHost
 				{
 					Path = ((LocationCurve)w.Location).Curve.Tessellate().Select((XYZ p) => new Point(p.X, p.Y)).ToArray(),
 					Thickness = w.Width
-				}).ToList(),
+				}).Concat(seps.Select((Line l) => new PlanWall
+				{
+					Path = new[] { new Point(l.GetEndPoint(0).X, l.GetEndPoint(0).Y), new Point(l.GetEndPoint(1).X, l.GetEndPoint(1).Y) },
+					Separator = true
+				})).ToList(),
 				Doors = (from d in doors
 					where d.LevelId == level.Id || (d.Host as Wall)?.LevelId == level.Id
 					select ToDoor(d) into d
@@ -236,9 +242,19 @@ internal class RevitStudioHost : IStudioHost
 	}
 
 	// Un room "Not Enclosed" toma el recinto de muros que contiene su punto, si ningún room sano ya está ahí
-	private List<Room> AdoptBroken(Level level, List<Room> rooms, List<Wall> onLevel)
+	// Líneas de separación de rooms del nivel (las del perímetro suelen cerrar los rooms contra el muro cortina)
+	private static List<Line> SeparatorsOn(List<CurveElement> all, Level level)
 	{
-		List<FoundRoom> found = RoomFinder.Find(onLevel, out _).OrderBy((FoundRoom f) => f.Area).ToList();
+		return (from c in all
+			where c.LevelId == level.Id || (c.SketchPlane != null && Math.Abs(c.SketchPlane.GetPlane().Origin.Z - level.ProjectElevation) < 0.5)
+			select c.GeometryCurve as Line into l
+			where l != null
+			select l).ToList();
+	}
+
+	private List<Room> AdoptBroken(Level level, List<Room> rooms, List<Wall> onLevel, List<Line> separators)
+	{
+		List<FoundRoom> found = RoomFinder.Find(onLevel, separators, out _).OrderBy((FoundRoom f) => f.Area).ToList();
 		_enclosures[level.Id.Value] = found;
 		List<Room> broken = _broken.Where((Room r) => r.LevelId == level.Id).ToList();
 		if (broken.Count == 0)

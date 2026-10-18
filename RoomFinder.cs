@@ -43,11 +43,17 @@ internal static class RoomFinder
 
 	public static List<FoundRoom> Find(List<Wall> walls, out List<Wall> loose)
 	{
+		return Find(walls, new List<Line>(), out loose);
+	}
+
+	// Con líneas de separación de rooms: cierran recintos igual que un muro, pero no son muros donde colgar nada
+	public static List<FoundRoom> Find(List<Wall> walls, List<Line> separators, out List<Wall> loose)
+	{
 		List<FoundRoom> list = new List<FoundRoom>();
 		foreach (IGrouping<ElementId, Wall> item in from w in walls
 			group w by w.LevelId)
 		{
-			list.AddRange(FindOnLevel(item.Key, item.ToList()));
+			list.AddRange(FindOnLevel(item.Key, item.ToList(), separators));
 		}
 		HashSet<ElementId> used = new HashSet<ElementId>(from rw in list.SelectMany((FoundRoom r) => r.Walls)
 			select rw.Wall.Id);
@@ -55,9 +61,24 @@ internal static class RoomFinder
 		return list;
 	}
 
-	private static List<FoundRoom> FindOnLevel(ElementId levelId, List<Wall> walls)
+	private static List<FoundRoom> FindOnLevel(ElementId levelId, List<Wall> walls, List<Line> separators)
 	{
 		List<Seg> list = new List<Seg>();
+		foreach (Line line in separators)
+		{
+			XYZ a = Flat(line.GetEndPoint(0));
+			XYZ b = Flat(line.GetEndPoint(1));
+			if (a.DistanceTo(b) >= 0.2)
+			{
+				list.Add(new Seg
+				{
+					P0 = a,
+					D = (b - a).Normalize(),
+					Len = a.DistanceTo(b),
+					Tol = 0.35
+				});
+			}
+		}
 		foreach (Wall wall in walls)
 		{
 			if (!(wall.Location is LocationCurve { Curve: Line curve }))
@@ -222,6 +243,10 @@ internal static class RoomFinder
 			group h by h.Seg)
 		{
 			Seg s = item.Key;
+			if (s.Wall == null)
+			{
+				continue;
+			}
 			HalfEdge halfEdge = item.First();
 			XYZ xYZ = nodes[halfEdge.To] - nodes[halfEdge.From];
 			int sign = ((new XYZ(0.0 - xYZ.Y, xYZ.X, 0.0).DotProduct(s.Wall.Orientation) > 0.0) ? 1 : (-1));

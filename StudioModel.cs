@@ -42,6 +42,8 @@ public class PlanWall
 	public Point[] Path;
 
 	public double Thickness;
+
+	public bool Separator;
 }
 
 public class PlanDoor
