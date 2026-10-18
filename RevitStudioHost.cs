@@ -279,6 +279,15 @@ internal class RevitStudioHost : IStudioHost
 			FitLayout(layout);
 		}
 		Levels = BuildLevels();
+		try
+		{
+			string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "QbiqTools");
+			System.IO.Directory.CreateDirectory(dir);
+			System.IO.File.WriteAllLines(System.IO.Path.Combine(dir, "furniture.txt"), _furnitureLog);
+		}
+		catch
+		{
+		}
 		long active = ((_doc.ActiveView as ViewPlan)?.GenLevel?.Id.Value).GetValueOrDefault(-1L);
 		StartLevel = Levels.Any((PlanLevel l) => l.Id == active) ? active : (Levels.FirstOrDefault()?.Id ?? -1);
 		CollectTypes(new HashSet<long>());
@@ -361,7 +370,8 @@ internal class RevitStudioHost : IStudioHost
 			AddFaces(level, rooms, adopted, layoutIds, onLevel.Where(Usable).ToList());
 			List<Furnishing> furniture = FurnitureOn(level);
 			_furniture[level.Id.Value] = furniture;
-			plan.Furniture = furniture.Where((Furnishing f) => f.Kind != FurnKind.Chair).Select((Furnishing f) => new PlanItem { Outline = f.Outline, Kind = f.Kind, Label = f.Label }).ToList();
+			// Los muebles no se dibujan (llenan mucho el plano), pero sí cuentan para las reglas
+			_furnitureLog.Add($"{level.Name}: {furniture.Count} ({string.Join(", ", furniture.GroupBy((Furnishing f) => f.Kind).Select((IGrouping<FurnKind, Furnishing> g) => g.Key + " " + g.Count()))})");
 			BlockFaces(level, furniture, plan.Doors);
 			AddPeople(plan, furniture);
 			if (level.Id.Value == _layoutLevel)
@@ -605,6 +615,8 @@ internal class RevitStudioHost : IStudioHost
 		return best;
 	}
 
+	private readonly List<string> _furnitureLog = new List<string>();
+
 	private static readonly BuiltInCategory[] FurnitureCategories =
 	{
 		BuiltInCategory.OST_Furniture,
@@ -650,11 +662,13 @@ internal class RevitStudioHost : IStudioHost
 				Kind = column ? FurnKind.Column : Furnishing.KindOf(name, bb.Max.Z - level.ProjectElevation)
 			});
 		}
+		_furnitureLog.Add($"{level.Name}: {list.Count} from the Revit model: " + string.Join(", ", list.GroupBy((Furnishing f) => f.Name).OrderByDescending((IGrouping<string, Furnishing> g) => g.Count()).Take(15).Select((IGrouping<string, Furnishing> g) => g.Key + " ×" + g.Count())));
 		if (level.Id.Value == _layoutLevel)
 		{
 			if (list.Count(IsFurniture) < 5)
 			{
 				list.AddRange(_jsonFurniture);
+				_furnitureLog.Add($"{level.Name}: added {_jsonFurniture.Count} from the design JSON");
 			}
 			if (!list.Any((Furnishing f) => f.Kind == FurnKind.Column))
 			{

@@ -59,16 +59,6 @@ public class PlanDoor
 	public double Thickness;
 }
 
-// Un mueble dibujado en el plano
-public class PlanItem
-{
-	public Point[] Outline;
-
-	public FurnKind Kind;
-
-	public string Label;
-}
-
 public class PlanLevel
 {
 	public long Id;
@@ -82,8 +72,6 @@ public class PlanLevel
 	public List<PlanDoor> Doors = new List<PlanDoor>();
 
 	public List<Point[]> Cores = new List<Point[]>();
-
-	public List<PlanItem> Furniture = new List<PlanItem>();
 
 	public Point? Entrance;
 

@@ -192,10 +192,6 @@ public class PlanView : FrameworkElement
 			Brush fill = (room.Use == RoomUse.Artwork) ? ArtFill : ((room.Use == RoomUse.Tv) ? TvFill : ((room == _hoverRoom) ? HoverFill : RoomFill));
 			dc.DrawGeometry(fill, null, RoomGeometry(room));
 		}
-		foreach (PlanItem item in _level.Furniture)
-		{
-			DrawItem(dc, item);
-		}
 		foreach (Point[] core in _level.Cores)
 		{
 			StreamGeometry cg = new StreamGeometry();
@@ -270,37 +266,6 @@ public class PlanView : FrameworkElement
 		else if (_hoverFace != null)
 		{
 			DrawTip(dc, _hoverFace.Title, _hoverFace.WallType + (_hoverFace.Core ? ", core wall. " : ". ") + FaceHint(_hoverFace), dpi);
-		}
-	}
-
-	private static readonly Brush TallFill = Freeze(new SolidColorBrush(Color.FromRgb(214, 218, 224)));
-
-	private static readonly Pen TallPen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(150, 157, 168))), 0.8));
-
-	private static readonly Pen ItemPen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(184, 190, 199))), 0.7));
-
-	// Muebles: los altos (y columnas) rellenos porque tapan el muro; los bajos solo el contorno
-	private void DrawItem(DrawingContext dc, PlanItem item)
-	{
-		if (item.Outline == null || item.Outline.Length < 3)
-		{
-			return;
-		}
-		StreamGeometry g = new StreamGeometry();
-		using (StreamGeometryContext ctx = g.Open())
-		{
-			ctx.BeginFigure(ToScreen(item.Outline[0]), isFilled: true, isClosed: true);
-			ctx.PolyLineTo(item.Outline.Skip(1).Select(ToScreen).ToList(), isStroked: true, isSmoothJoin: false);
-		}
-		g.Freeze();
-		bool tall = item.Kind == FurnKind.Tall || item.Kind == FurnKind.Column;
-		if (item.Kind == FurnKind.Tv)
-		{
-			dc.DrawGeometry(Theme.Dark, null, g);
-		}
-		else
-		{
-			dc.DrawGeometry(tall ? TallFill : null, tall ? TallPen : ItemPen, g);
 		}
 	}
 
