@@ -973,7 +973,8 @@ internal class RevitStudioHost : IStudioHost
 	// Dónde cabe una pieza más en una cara con artwork (null si no cabe): el centro del tramo libre más largo
 	private Tuple<double, double> RoomForOneMore(FaceState f)
 	{
-		if (!f.On || f.TvWall)
+		// Solo en una línea azul que ya tiene piezas y ningún problema (una roja no tiene donde poner otra)
+		if (!f.On || f.TvWall || _faceProblems.ContainsKey(f.Key) || !_artPlans.Any((ArtPlan a) => a.Face == f))
 		{
 			return null;
 		}

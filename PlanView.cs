@@ -251,17 +251,17 @@ public class PlanView : FrameworkElement
 	{
 		Vector n = f.Normal;
 		n.Normalize();
-		return ToScreen(f.AddAt.Value) + new Vector(n.X, -n.Y) * 14.0;
+		return ToScreen(f.AddAt.Value) + new Vector(n.X, -n.Y) * 10.0;
 	}
 
 	private void DrawAdd(DrawingContext dc, PlanFace f)
 	{
 		Point c = AddCenter(f);
 		bool hot = f == _hoverAdd;
-		dc.DrawEllipse(hot ? Theme.Accent : Theme.Panel, new Pen(Theme.Accent, 1.5), c, 9.0, 9.0);
-		Pen plus = new Pen(hot ? Theme.Panel : Theme.Accent, 2.0);
-		dc.DrawLine(plus, c + new Vector(-4.5, 0.0), c + new Vector(4.5, 0.0));
-		dc.DrawLine(plus, c + new Vector(0.0, -4.5), c + new Vector(0.0, 4.5));
+		dc.DrawEllipse(hot ? Theme.Accent : Theme.Panel, new Pen(Theme.Accent, 1.2), c, 6.0, 6.0);
+		Pen plus = new Pen(hot ? Theme.Panel : Theme.Accent, 1.5);
+		dc.DrawLine(plus, c + new Vector(-3.0, 0.0), c + new Vector(3.0, 0.0));
+		dc.DrawLine(plus, c + new Vector(0.0, -3.0), c + new Vector(0.0, 3.0));
 	}
 
 	private PlanFace AddAt(Point screen)
@@ -270,7 +270,7 @@ public class PlanView : FrameworkElement
 		{
 			return null;
 		}
-		return _faces.Where((PlanFace f) => f.LevelId == _level.Id && f.AddAt.HasValue).FirstOrDefault((PlanFace f) => (AddCenter(f) - screen).Length <= 11.0);
+		return _faces.Where((PlanFace f) => f.LevelId == _level.Id && f.AddAt.HasValue).FirstOrDefault((PlanFace f) => (AddCenter(f) - screen).Length <= 8.0);
 	}
 
 	private RoomUse UseOf(long roomId)
