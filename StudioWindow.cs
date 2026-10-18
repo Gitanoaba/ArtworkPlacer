@@ -107,11 +107,10 @@ public class StudioWindow : Window
 		_host = host;
 		_settings = settings;
 		Title = "Room Studio";
-		Width = Math.Min(1360.0, SystemParameters.WorkArea.Width - 40.0);
-		Height = Math.Min(880.0, SystemParameters.WorkArea.Height - 40.0);
+		Width = Math.Min(1180.0, SystemParameters.WorkArea.Width - 80.0);
+		Height = Math.Min(780.0, SystemParameters.WorkArea.Height - 80.0);
 		MinWidth = 960.0;
 		MinHeight = 620.0;
-		WindowState = WindowState.Maximized;
 		WindowStartupLocation = WindowStartupLocation.CenterScreen;
 		Theme.Apply(this);
 		_alignBox = ArtworkDialog.NewAlignBox(settings.Align, includeFamilyDefault: true);
@@ -188,6 +187,7 @@ public class StudioWindow : Window
 		_plan.RoomClicked += (room, add) => Select(room, add);
 		_plan.BackgroundClicked += () => Select(null, add: false);
 		_plan.MarkerClicked += OnMarker;
+		_plan.MarkerMoved += (m, center) => Run(() => _host.MovePiece(m.Key, center));
 		_plan.FaceClicked += (face) => Run(() => _host.ChangeFace(face.Key));
 		_suggestButton.Click += (s, e) => Run(() => _host.Suggest());
 		_collectionBox.SelectionChanged += (s, e) =>

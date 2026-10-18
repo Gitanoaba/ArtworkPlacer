@@ -211,6 +211,8 @@ public interface IStudioHost
 	PreviewResult SetRoomCollection(long roomId, string collection);
 
 	PreviewResult SetRoomZone(long roomId, ArtZone? zone);
+
+	PreviewResult MovePiece(int markerKey, Point center);
 }
 
 public class StudioSettings

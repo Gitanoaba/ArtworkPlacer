@@ -28,6 +28,9 @@ public class StudioCommand : IExternalCommand
 		_settings.GapText = _settings.GapText ?? host.Cm(60.0);
 		_settings.TvBottomText = _settings.TvBottomText ?? host.Cm(100.0);
 		StudioWindow window = new StudioWindow(host, _settings);
+		// Ventana hija de Revit: flota delante del modelo y se centra sobre él
+		new System.Windows.Interop.WindowInteropHelper(window).Owner = commandData.Application.MainWindowHandle;
+		window.WindowStartupLocation = System.Windows.WindowStartupLocation.CenterOwner;
 		if (window.ShowDialog() != true)
 		{
 			return Result.Cancelled;

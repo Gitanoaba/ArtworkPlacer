@@ -45,6 +45,8 @@ internal class RevitStudioHost : IStudioHost
 		public WallPlacer.Piece Piece;
 
 		public WallPlacer Placer;
+
+		public int Index;
 	}
 
 	private const double MinFreeFace = 2.0;
@@ -152,6 +154,9 @@ internal class RevitStudioHost : IStudioHost
 	public List<ClientBoard> Boards { get; private set; } = new List<ClientBoard>();
 
 	private readonly Dictionary<long, ArtZone> _roomZone = new Dictionary<long, ArtZone>();
+
+	// Posiciones elegidas arrastrando: (cara, n.º de pieza en esa cara) → centro a lo largo del muro
+	private readonly Dictionary<Tuple<int, int>, double> _pins = new Dictionary<Tuple<int, int>, double>();
 
 	private const string ZoneKey = "zone:";
 
@@ -874,7 +879,13 @@ internal class RevitStudioHost : IStudioHost
 			foreach (WallPlacer.Piece p in placer.Plan(wall, ranges.Signs(wall.Id), notes))
 			{
 				FaceState face = faces.FirstOrDefault((FaceState f) => f.Face.Sign == p.Sign && p.Center >= f.Face.U0 - 0.05 && p.Center <= f.Face.U1 + 0.05) ?? faces.First((FaceState f) => f.Face.Sign == p.Sign);
-				_artPlans.Add(new ArtPlan { Key = ++_nextKey, Face = face, Piece = p, Placer = placer });
+				int index = _artPlans.Count((ArtPlan x) => x.Face == face);
+				ArtPlan plan = new ArtPlan { Key = ++_nextKey, Face = face, Piece = p, Placer = placer, Index = index };
+				if (_pins.TryGetValue(Tuple.Create(face.Key, index), out var pinned))
+				{
+					MoveTo(plan, pinned);
+				}
+				_artPlans.Add(plan);
 			}
 			string why = Sentence(notes.FirstOrDefault((string n) => n.StartsWith("free")) ?? notes.FirstOrDefault() ?? "No free space here for the artwork");
 			foreach (FaceState f in faces.Where((FaceState f) => !_artPlans.Any((ArtPlan a) => a.Face == f)))
@@ -882,6 +893,32 @@ internal class RevitStudioHost : IStudioHost
 				_faceProblems[f.Key] = why;
 			}
 		}
+	}
+
+	// Arrastrar una pieza en el plano: se queda dentro de su cara y la posición sobrevive a los cambios de opciones
+	public PreviewResult MovePiece(int markerKey, Point center)
+	{
+		ArtPlan a = _artPlans.FirstOrDefault((ArtPlan x) => x.Key == markerKey);
+		if (a == null)
+		{
+			return State(null);
+		}
+		Line line = (Line)((LocationCurve)a.Piece.Wall.Location).Curve;
+		XYZ p0 = line.GetEndPoint(0);
+		double u = (new XYZ(center.X, center.Y, p0.Z) - p0).DotProduct(line.Direction);
+		double half = a.Piece.Width / 2.0;
+		double lo = a.Face.Face.U0 + half;
+		double hi = a.Face.Face.U1 - half;
+		u = (lo <= hi) ? Math.Max(lo, Math.Min(hi, u)) : a.Piece.Center;
+		MoveTo(a, u);
+		_pins[Tuple.Create(a.Face.Key, a.Index)] = u;
+		return State(null);
+	}
+
+	private static void MoveTo(ArtPlan a, double u)
+	{
+		a.Piece.OnFace = a.Piece.OnFace + a.Piece.Along * (u - a.Piece.Center);
+		a.Piece.Center = u;
 	}
 
 	public PreviewResult SetRoomCollection(long roomId, string collection)
@@ -977,6 +1014,7 @@ internal class RevitStudioHost : IStudioHost
 		}
 		f.On = !f.On;
 		f.Suggested = false;
+		_pins.Keys.Where((Tuple<int, int> k) => k.Item1 == f.Key).ToList().ForEach((Tuple<int, int> k) => _pins.Remove(k));
 		InTransaction(delegate
 		{
 			ReplanWall(f.Face.Wall);

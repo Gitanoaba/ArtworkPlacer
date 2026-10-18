@@ -34,7 +34,7 @@ public class PlanView : FrameworkElement
 
 	private PlanLevel _level;
 
-	private static readonly Pen OpenFacePen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(147, 176, 255))), 3.0) { DashStyle = new DashStyle(new double[] { 2.0, 1.2 }, 0), StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat });
+	private static readonly Pen OpenFacePen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(147, 176, 255))), 2.0) { DashStyle = new DashStyle(new double[] { 2.5, 1.5 }, 0), StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat });
 
 	private static readonly Pen BlockedFacePen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(196, 200, 207))), 1.5) { DashStyle = new DashStyle(new double[] { 1, 2 }, 0) });
 
@@ -67,6 +67,15 @@ public class PlanView : FrameworkElement
 	public event Action<PlanRoom, bool> RoomClicked;
 
 	public event Action<PlanMarker> MarkerClicked;
+
+	// Una pieza de artwork arrastrada a lo largo de su muro: la pieza y su nuevo centro (coordenadas del modelo)
+	public event Action<PlanMarker, Point> MarkerMoved;
+
+	private PlanMarker _dragMarker;
+
+	private Point _dragOrigin;
+
+	private bool _dragging;
 
 	public event Action BackgroundClicked;
 
@@ -117,7 +126,7 @@ public class PlanView : FrameworkElement
 		}
 		double x0 = pts.Min((Point p) => p.X), x1 = pts.Max((Point p) => p.X);
 		double y0 = pts.Min((Point p) => p.Y), y1 = pts.Max((Point p) => p.Y);
-		double pad = 18.0;
+		double pad = 36.0;
 		_scale = Math.Min((ActualWidth - pad * 2.0) / Math.Max(1.0, x1 - x0), (ActualHeight - pad * 2.0) / Math.Max(1.0, y1 - y0));
 		_offset = new Vector(ActualWidth / 2.0 - (x0 + x1) / 2.0 * _scale, ActualHeight / 2.0 + (y0 + y1) / 2.0 * _scale);
 		_fitted = true;
@@ -240,7 +249,7 @@ public class PlanView : FrameworkElement
 		{
 			return m.CanMove ? "Click to move it to the next wall, or click a dashed wall." : "Only wall that fits";
 		}
-		return "Click to leave this one out";
+		return "Drag along the wall to move it, or click to leave it out";
 	}
 
 	private string FaceHint(PlanFace f)
@@ -284,15 +293,15 @@ public class PlanView : FrameworkElement
 		}
 		else if (f.On && f.Problem != null)
 		{
-			pen = new Pen(Theme.Danger, hot ? 6.5 : 4.5);
+			pen = new Pen(Theme.Danger, hot ? 4.5 : 3.0);
 		}
 		else if (f.On)
 		{
-			pen = new Pen(f.TvWall ? Theme.Dark : Theme.Accent, hot ? 6.5 : 4.5);
+			pen = new Pen(f.TvWall ? Theme.Dark : Theme.Accent, hot ? 4.5 : 3.0);
 		}
 		else
 		{
-			pen = hot ? new Pen(Theme.Accent, 5.0) : OpenFacePen;
+			pen = hot ? new Pen(Theme.Accent, 3.0) : OpenFacePen;
 		}
 		dc.DrawLine(pen, l[0], l[1]);
 	}
@@ -410,7 +419,7 @@ public class PlanView : FrameworkElement
 			return null;
 		}
 		PlanMarker best = null;
-		double bestD = 13.0;
+		double bestD = 8.0;
 		foreach (PlanMarker m in _markers.Where((PlanMarker m) => m.LevelId == _level.Id))
 		{
 			Vector along = m.Along;
@@ -473,6 +482,10 @@ public class PlanView : FrameworkElement
 		_down = e.GetPosition(this);
 		_last = _down.Value;
 		_panning = e.ChangedButton != MouseButton.Left;
+		PlanMarker grab = (e.ChangedButton == MouseButton.Left) ? MarkerAt(_down.Value) : null;
+		_dragMarker = (grab != null && grab.Use == RoomUse.Artwork && !grab.Skipped) ? grab : null;
+		_dragOrigin = (_dragMarker != null) ? _dragMarker.Center : default(Point);
+		_dragging = false;
 		CaptureMouse();
 		e.Handled = true;
 	}
@@ -480,6 +493,21 @@ public class PlanView : FrameworkElement
 	protected override void OnMouseMove(MouseEventArgs e)
 	{
 		_mouse = e.GetPosition(this);
+		if (_down.HasValue && IsMouseCaptured && _dragMarker != null)
+		{
+			// Arrastrar la pieza: solo se mueve a lo largo de su muro
+			if (_dragging || (_mouse - _down.Value).Length > 4.0)
+			{
+				_dragging = true;
+				Vector along = _dragMarker.Along;
+				along.Normalize();
+				Vector moved = ToWorld(_mouse) - ToWorld(_down.Value);
+				_dragMarker.Center = _dragOrigin + along * (moved * along);
+				Cursor = Cursors.SizeWE;
+				InvalidateVisual();
+			}
+			return;
+		}
 		if (_down.HasValue && IsMouseCaptured)
 		{
 			if (!_panning && (_mouse - _down.Value).Length > 4.0)
@@ -519,7 +547,7 @@ public class PlanView : FrameworkElement
 			where f.LevelId == _level.Id
 			let l = FaceLine(f)
 			let d = DistanceToSegment(screen, l[0], l[1])
-			where d < 11.0
+			where d < 6.0
 			orderby f.Allowed descending, d
 			select f).FirstOrDefault();
 	}
@@ -531,6 +559,14 @@ public class PlanView : FrameworkElement
 		_panning = false;
 		ReleaseMouseCapture();
 		Cursor = Cursors.Arrow;
+		PlanMarker dragged = _dragging ? _dragMarker : null;
+		_dragMarker = null;
+		_dragging = false;
+		if (dragged != null)
+		{
+			MarkerMoved?.Invoke(dragged, dragged.Center);
+			return;
+		}
 		if (!click || e.ChangedButton != MouseButton.Left)
 		{
 			return;
