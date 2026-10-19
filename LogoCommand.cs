@@ -47,7 +47,8 @@ public class LogoCommand : IExternalCommand
 			receptionNames = "the wall facing the main entrance, from Room Studio";
 		}
 
-		LogoWindow window = new LogoWindow(LogoPlacer.FindLogo(uiapp, doc), receptionNames, walls.Count, _widthText, _heightText, parse);
+		int existingLogos = new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().Count((FamilyInstance fi) => fi.Symbol.FamilyName == LogoFamily.FamilyName);
+		LogoWindow window = new LogoWindow(LogoPlacer.FindLogo(uiapp, doc), receptionNames, walls.Count, _widthText, _heightText, parse, existingLogos);
 		if (window.ShowDialog() != true)
 		{
 			return Result.Cancelled;
@@ -101,7 +102,7 @@ public class LogoCommand : IExternalCommand
 		// Recepción con un logo ya colocado: recargar la familia y el material ya lo actualizó
 		List<ElementId> existing = new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>()
 			.Where((FamilyInstance fi) => fi.Symbol.Family.Id == symbol.Family.Id).Select((FamilyInstance fi) => fi.Id).ToList();
-		if (window.UseReception && existing.Count > 0)
+		if ((window.UseReception || window.UpdateOnly) && existing.Count > 0)
 		{
 			uidoc.Selection.SetElementIds(existing);
 			TaskDialog.Show(ToolName, $"Updated the logo already in the model ({Fmt(width)} × {Fmt(height)}). It's selected so you can check it. To add it on other walls, select them and run Place Logo again.");

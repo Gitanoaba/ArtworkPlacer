@@ -42,6 +42,28 @@ internal static class LogoFamily
 	}
 
 	// Genera la familia con el rectángulo de w × h (pies) y la carga en el proyecto. Fuera de toda transacción.
+	// Imagen gris con "CLIENT LOGO" para reservar el lugar hasta que llegue la del cliente
+	public static string Placeholder()
+	{
+		string dir = Path.Combine(Path.GetTempPath(), "QbiqTools");
+		Directory.CreateDirectory(dir);
+		string file = Path.Combine(dir, "client_logo_placeholder.png");
+		if (!File.Exists(file))
+		{
+			using System.Drawing.Bitmap bmp = new System.Drawing.Bitmap(800, 400);
+			using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bmp))
+			{
+				g.Clear(System.Drawing.Color.FromArgb(225, 228, 233));
+				g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+				using System.Drawing.Font font = new System.Drawing.Font("Segoe UI", 64f, System.Drawing.FontStyle.Bold);
+				using System.Drawing.StringFormat center = new System.Drawing.StringFormat { Alignment = System.Drawing.StringAlignment.Center, LineAlignment = System.Drawing.StringAlignment.Center };
+				g.DrawString("CLIENT LOGO", font, System.Drawing.Brushes.Gray, new System.Drawing.RectangleF(0f, 0f, 800f, 400f), center);
+			}
+			bmp.Save(file, System.Drawing.Imaging.ImageFormat.Png);
+		}
+		return file;
+	}
+
 	public static FamilySymbol Build(Document doc, RevitApp app, double w, double h)
 	{
 		string template = FindTemplate(app);

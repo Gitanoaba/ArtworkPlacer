@@ -197,10 +197,43 @@ internal class RevitStudioHost : IStudioHost
 
 	private FaceState _logoFace;
 
-	// El muro del logo, si el usuario quiere el logo (si no, queda libre para arte)
-	private FaceState LogoFace => (_req != null && !_req.PlaceLogo) ? null : _logoFace;
-
 	public bool HasLogoWall => _logoFace != null;
+
+	// Muros con logo: el que se ve desde la entrada (si el usuario lo quiere) y los que marque a mano
+	private readonly HashSet<int> _logoOn = new HashSet<int>();
+
+	private bool _logoAutoOff;
+
+	private bool IsLogo(FaceState f)
+	{
+		return _logoOn.Contains(f.Key) || (f == _logoFace && _req != null && _req.PlaceLogo && !_logoAutoOff);
+	}
+
+	// Accent walls: el de la TV en las salas con TV (si está activado) y los que se marquen a mano
+	private readonly HashSet<int> _accentOn = new HashSet<int>();
+
+	private readonly HashSet<int> _accentOff = new HashSet<int>();
+
+	private bool IsAccent(FaceState f)
+	{
+		if (_accentOn.Contains(f.Key))
+		{
+			return true;
+		}
+		return !_accentOff.Contains(f.Key) && _req != null && _req.AccentOnTv && f.TvWall && IsTv(f.RoomId);
+	}
+
+	public string LogoImage => LogoPlacer.FindLogo(_uidoc.Application, _doc);
+
+	public List<NamedId> Materials { get; private set; } = new List<NamedId>();
+
+	public List<NamedId> AccentWallTypes { get; private set; } = new List<NamedId>();
+
+	public long AccentMaterialDefault { get; private set; } = -1L;
+
+	public long AccentWallTypeDefault { get; private set; } = -1L;
+
+	public string AccentNote { get; private set; }
 
 	// El muro del logo (el que se ve desde la entrada principal), para Place Logo
 	public LogoTarget LogoTarget => (_logoFace == null) ? null : new LogoTarget
@@ -291,6 +324,92 @@ internal class RevitStudioHost : IStudioHost
 		long active = ((_doc.ActiveView as ViewPlan)?.GenLevel?.Id.Value).GetValueOrDefault(-1L);
 		StartLevel = Levels.Any((PlanLevel l) => l.Id == active) ? active : (Levels.FirstOrDefault()?.Id ?? -1);
 		CollectTypes(new HashSet<long>());
+		CollectAccent(layout);
+	}
+
+	// Materiales y tipos de muro para el accent wall; el material que pide el diseño sale de su *_materials.json
+	private void CollectAccent(DesignLayout layout)
+	{
+		Materials = (from Material m in new FilteredElementCollector(_doc).OfClass(typeof(Material))
+			orderby m.Name
+			select new NamedId { Id = m.Id.Value, Name = m.Name }).ToList();
+		AccentWallTypes = (from WallType t in new FilteredElementCollector(_doc).OfClass(typeof(WallType))
+			where t.Kind == WallKind.Basic
+			orderby t.Name.IndexOf("accent", StringComparison.OrdinalIgnoreCase) < 0, t.Name
+			select new NamedId { Id = t.Id.Value, Name = t.Name }).ToList();
+		string wanted = DesignAccentMaterial(layout, out var source);
+		NamedId match = MatchName(Materials, wanted);
+		AccentMaterialDefault = match?.Id ?? -1L;
+		NamedId accentType = AccentWallTypes.FirstOrDefault((NamedId t) => t.Name.IndexOf("accent", StringComparison.OrdinalIgnoreCase) >= 0 && wanted != null && Norm(t.Name).Contains(Norm(wanted))) ?? AccentWallTypes.FirstOrDefault((NamedId t) => t.Name.IndexOf("accent", StringComparison.OrdinalIgnoreCase) >= 0);
+		AccentWallTypeDefault = accentType?.Id ?? -1L;
+		if (wanted == null)
+		{
+			AccentNote = "Pick the accent material (no *_materials.json found for this design).";
+		}
+		else if (match == null)
+		{
+			AccentNote = "The design asks for \"" + wanted + "\", which isn't a material in this model. Pick one, or a wall type that already has it.";
+		}
+		else
+		{
+			AccentNote = "The design asks for \"" + wanted + "\" (from " + source + ").";
+		}
+	}
+
+	// conference_accent_wall del materials.json: junto al JSON cargado o en Documentos\QBIQ_DEV_DATA\<id>
+	private string DesignAccentMaterial(DesignLayout layout, out string source)
+	{
+		source = null;
+		List<string> folders = new List<string>();
+		string root = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QBIQ_DEV_DATA");
+		if (layout != null)
+		{
+			folders.Add(System.IO.Path.GetDirectoryName(layout.File));
+			string digits = new string(System.IO.Path.GetFileNameWithoutExtension(layout.File).TakeWhile(char.IsDigit).ToArray());
+			if (digits.Length > 0)
+			{
+				folders.Add(System.IO.Path.Combine(root, digits));
+			}
+		}
+		string id = LogoPlacer.DesignId(_uidoc.Application);
+		if (!string.IsNullOrEmpty(id))
+		{
+			folders.Add(System.IO.Path.Combine(root, id));
+		}
+		foreach (string folder in folders.Where(System.IO.Directory.Exists))
+		{
+			try
+			{
+				foreach (string file in System.IO.Directory.GetFiles(folder, "*_materials.json"))
+				{
+					var js = new System.Web.Script.Serialization.JavaScriptSerializer();
+					if (js.DeserializeObject(System.IO.File.ReadAllText(file)) is Dictionary<string, object> d && d.TryGetValue("materials", out var m) && m is Dictionary<string, object> mats && mats.TryGetValue("conference_accent_wall", out var v) && v is string name && !string.IsNullOrWhiteSpace(name))
+					{
+						source = System.IO.Path.GetFileName(file);
+						return name.Trim();
+					}
+				}
+			}
+			catch
+			{
+			}
+		}
+		return null;
+	}
+
+	private static string Norm(string s)
+	{
+		return System.Text.RegularExpressions.Regex.Replace((s ?? "").ToLowerInvariant(), "[^a-z0-9]+", " ").Trim();
+	}
+
+	private static NamedId MatchName(List<NamedId> items, string wanted)
+	{
+		if (string.IsNullOrWhiteSpace(wanted))
+		{
+			return null;
+		}
+		string w = Norm(wanted);
+		return items.FirstOrDefault((NamedId i) => Norm(i.Name) == w) ?? items.Where((NamedId i) => Norm(i.Name).Contains(w)).OrderBy((NamedId i) => i.Name.Length).FirstOrDefault() ?? items.FirstOrDefault((NamedId i) => Norm(i.Name).Length > 3 && w.Contains(Norm(i.Name)));
 	}
 
 	public string Fmt(double feet)
@@ -1288,7 +1407,38 @@ internal class RevitStudioHost : IStudioHost
 		List<TypeItem> loaded = all.Where((TypeItem t) => fresh.Contains(t.Id) && !art.Contains(t) && !tv.Contains(t)).ToList();
 		loaded.ForEach((TypeItem t) => t.IsChecked = true);
 		ArtTypes = Keep(ArtTypes, art.Concat(loaded.Where((TypeItem t) => !PlaceTvCommand.LooksLikeTv(t.Label))).ToList(), fresh);
+		MeasureArt(ArtTypes);
+		ArtTypes = ArtTypes.OrderBy((TypeItem t) => (t.Area > 0.0) ? 0 : 1).ThenBy((TypeItem t) => t.Area).ThenBy((TypeItem t) => t.Label).ToList();
 		TvTypes = Keep(TvTypes, tv.Concat(loaded.Where((TypeItem t) => PlaceTvCommand.LooksLikeTv(t.Label))).ToList(), fresh);
+	}
+
+	// Ancho × alto de cada pieza, de una instancia en el modelo (las secciones de artwork las tienen)
+	private void MeasureArt(List<TypeItem> items)
+	{
+		Dictionary<long, TypeItem> byId = items.ToDictionary((TypeItem t) => t.Id);
+		HashSet<long> done = new HashSet<long>();
+		foreach (FamilyInstance fi in new FilteredElementCollector(_doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>())
+		{
+			long id = fi.Symbol.Id.Value;
+			if (!byId.TryGetValue(id, out var item) || done.Contains(id))
+			{
+				continue;
+			}
+			BoundingBoxXYZ bb = fi.get_BoundingBox(null);
+			if (bb == null)
+			{
+				continue;
+			}
+			double w = Math.Max(bb.Max.X - bb.Min.X, bb.Max.Y - bb.Min.Y);
+			double h = bb.Max.Z - bb.Min.Z;
+			if (w <= 0.01 || h <= 0.01 || w > 30.0 || h > 30.0)
+			{
+				continue;
+			}
+			done.Add(id);
+			item.Area = w * h;
+			item.Size = $"{Math.Round(UnitUtils.ConvertFromInternalUnits(w, UnitTypeId.Centimeters))} × {Math.Round(UnitUtils.ConvertFromInternalUnits(h, UnitTypeId.Centimeters))} cm";
+		}
 	}
 
 	private static List<TypeItem> Keep(List<TypeItem> old, List<TypeItem> fresh, HashSet<long> loaded)
@@ -1436,8 +1586,8 @@ internal class RevitStudioHost : IStudioHost
 			symbols = (Client != null && Client.Zones.TryGetValue(zone, out var ids)) ? Symbols(ids) : new List<FamilySymbol>();
 			if (zone == ArtZone.General)
 			{
-				gap = Math.Max(gap, UnitUtils.ConvertToInternalUnits(3.5, UnitTypeId.Meters));
-				max = Math.Max(max, 4);
+				gap = Math.Max(gap, UnitUtils.ConvertToInternalUnits(3.5, UnitTypeId.Meters) / AmountFactor);
+				max = Math.Max(max, (int)Math.Round(4.0 * AmountFactor));
 			}
 			else
 			{
@@ -1924,6 +2074,106 @@ internal class RevitStudioHost : IStudioHost
 		return State(null);
 	}
 
+	// El slider de cantidad: menos o más piezas al sugerir (y separación en pasillos con cliente)
+	private double AmountFactor => new[] { 0.4, 0.7, 1.0, 1.4, 2.0 }[Math.Max(1, Math.Min(5, _req?.Amount ?? 3)) - 1];
+
+	private int Take(int normal)
+	{
+		return Math.Max(1, (int)Math.Round(normal * AmountFactor));
+	}
+
+	// Con otra cantidad: se rehacen las sugerencias (lo marcado a mano queda)
+	public PreviewResult Resuggest()
+	{
+		if (_req == null)
+		{
+			return null;
+		}
+		List<FaceState> old = _faces.Where((FaceState f) => f.Suggested).ToList();
+		if (old.Count == 0)
+		{
+			return State(null);
+		}
+		old.ForEach(delegate(FaceState f)
+		{
+			f.On = false;
+			f.Suggested = false;
+		});
+		InTransaction(delegate
+		{
+			old.Select((FaceState f) => f.Face.Wall).GroupBy((Wall w) => w.Id).Select((IGrouping<ElementId, Wall> g) => g.First()).ToList().ForEach(ReplanWall);
+		});
+		return Suggest();
+	}
+
+	public PreviewResult ToggleAccent(int faceKey)
+	{
+		FaceState f = _faces.FirstOrDefault((FaceState x) => x.Key == faceKey);
+		if (f == null || _req == null)
+		{
+			return null;
+		}
+		if (f.Block != null && !f.Block.StartsWith("Blocked", StringComparison.Ordinal))
+		{
+			return State(f.Block + ". No accent wall here.");
+		}
+		if (IsAccent(f))
+		{
+			if (!_accentOn.Remove(f.Key))
+			{
+				_accentOff.Add(f.Key);
+			}
+		}
+		else
+		{
+			_accentOff.Remove(f.Key);
+			if (!IsAccent(f))
+			{
+				_accentOn.Add(f.Key);
+			}
+		}
+		return State(IsAccent(f) ? "Accent wall here. Click it again to take it off." : null);
+	}
+
+	public PreviewResult ToggleLogo(int faceKey)
+	{
+		FaceState f = _faces.FirstOrDefault((FaceState x) => x.Key == faceKey);
+		if (f == null || _req == null)
+		{
+			return null;
+		}
+		if (!IsLogo(f) && f.Block != null && !f.Block.StartsWith("Blocked", StringComparison.Ordinal))
+		{
+			return State(f.Block + ". No logo here.");
+		}
+		if (IsLogo(f))
+		{
+			_logoOn.Remove(f.Key);
+			if (f == _logoFace)
+			{
+				_logoAutoOff = true;
+			}
+		}
+		else if (f == _logoFace)
+		{
+			_logoAutoOff = false;
+		}
+		else
+		{
+			_logoOn.Add(f.Key);
+		}
+		if (IsLogo(f) && f.On)
+		{
+			f.On = false;
+			f.Suggested = false;
+			InTransaction(delegate
+			{
+				ReplanWall(f.Face.Wall);
+			});
+		}
+		return State(IsLogo(f) ? "Logo on this wall. Click it again to take it off." : null);
+	}
+
 	public PreviewResult Suggest()
 	{
 		if (_req == null)
@@ -1960,7 +2210,7 @@ internal class RevitStudioHost : IStudioHost
 	{
 		List<FaceState> picks = new List<FaceState>();
 		foreach (IGrouping<long, FaceState> room in from f in _faces
-			where f.RoomId != 0 && Allowed(f) && !IsTv(f.RoomId) && f != LogoFace
+			where f.RoomId != 0 && Allowed(f) && !IsTv(f.RoomId) && !IsLogo(f)
 			group f by f.RoomId)
 		{
 			string name = NameOf(room.Key);
@@ -1970,13 +2220,13 @@ internal class RevitStudioHost : IStudioHost
 			{
 				continue;
 			}
-			int take = open ? 3 : ((m2 >= 40.0) ? 2 : 1);
-			double min = UnitUtils.ConvertToInternalUnits(open ? 3.0 : 1.5, UnitTypeId.Meters);
+			int take = Take(open ? 3 : ((m2 >= 40.0) ? 2 : 1));
+			double min = UnitUtils.ConvertToInternalUnits(open ? 3.0 : 1.5, UnitTypeId.Meters) / Math.Max(1.0, AmountFactor);
 			picks.AddRange(room.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= min).OrderByDescending((FaceState f) => _sofaFaces.Contains(f.Key)).ThenByDescending((FaceState f) => f.Face.U1 - f.Face.U0).Take(take));
 		}
-		double freeMin = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
+		double freeMin = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters) / AmountFactor;
 		double coreMin = UnitUtils.ConvertToInternalUnits(1.5, UnitTypeId.Meters);
-		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && f != LogoFace && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? coreMin : freeMin)));
+		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && !IsLogo(f) && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? coreMin : freeMin)));
 		return picks;
 	}
 
@@ -1988,7 +2238,7 @@ internal class RevitStudioHost : IStudioHost
 		double m15 = UnitUtils.ConvertToInternalUnits(1.5, UnitTypeId.Meters);
 		double m3 = UnitUtils.ConvertToInternalUnits(3.0, UnitTypeId.Meters);
 		foreach (IGrouping<long, FaceState> room in from f in _faces
-			where f.RoomId != 0 && Allowed(f) && !f.TvWall && f != LogoFace
+			where f.RoomId != 0 && Allowed(f) && !f.TvWall && !IsLogo(f)
 			group f by f.RoomId)
 		{
 			if (room.Any((FaceState f) => f.On) || WallRules.IsService(NameOf(room.Key)))
@@ -2000,21 +2250,21 @@ internal class RevitStudioHost : IStudioHost
 			switch (ZoneOfRoom(room.Key))
 			{
 			case ArtZone.General:
-				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m3).Take(3));
+				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m3 / AmountFactor).Take(Take(3)));
 				break;
 			case ArtZone.Kitchen:
-				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(2));
+				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(Take(2)));
 				break;
 			case ArtZone.Meeting:
-				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(IsTv(room.Key) ? 1 : 2));
+				picks.AddRange(longest.Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(Take(IsTv(room.Key) ? 1 : 2)));
 				break;
 			case ArtZone.Reception:
 				// El muro del logo ya quedó afuera; sin él, se reserva el más largo
-				picks.AddRange(longest.Skip((LogoFace == null && longest.Count > 1) ? 1 : 0).Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(1));
+				picks.AddRange(longest.Skip((!_faces.Any((FaceState x) => x.RoomId == room.Key && IsLogo(x)) && longest.Count > 1) ? 1 : 0).Where((FaceState f) => f.Face.U1 - f.Face.U0 >= m15).Take(1));
 				break;
 			}
 		}
-		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && f != LogoFace && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? m15 : m3)));
+		picks.AddRange(_faces.Where((FaceState f) => f.RoomId == 0 && !f.On && !f.Unroomed && !IsLogo(f) && Allowed(f) && f.Face.U1 - f.Face.U0 >= (f.CoreFront ? m15 : m3) / AmountFactor));
 		return picks;
 	}
 
@@ -2065,7 +2315,8 @@ internal class RevitStudioHost : IStudioHost
 			Reason = Why(f),
 			Core = f.Core,
 			TvWall = f.TvWall,
-			Logo = f == LogoFace,
+			Logo = IsLogo(f),
+			Accent = IsAccent(f),
 			On = f.On || f.TvWall,
 			Suggested = f.Suggested,
 			Problem = _faceProblems.TryGetValue(f.Key, out var p) ? p : null,
@@ -2153,14 +2404,34 @@ internal class RevitStudioHost : IStudioHost
 		int tvs = 0;
 		int arts = 0;
 		int logos = 0;
+		int accents = 0;
+		List<FaceState> logoFaces = _faces.Where(IsLogo).ToList();
+		List<FaceState> accentFaces = _faces.Where(IsAccent).ToList();
 		// El logo del cliente: familia y material antes de la transacción, como Place Logo
-		FamilySymbol logo = (LogoFace != null) ? BuildLogo(notes, out var logoReady) : null;
+		FamilySymbol logo = (logoFaces.Count > 0) ? BuildLogo(logoFaces, notes) : null;
 		TransactionStatus status;
 		using (Transaction t = new Transaction(_doc, "Room Studio: place TVs and artwork"))
 		{
 			PlaceArtworkCommand.SwallowWarnings(t);
 			t.Start();
 			Activate(AllSymbols());
+			// Primero los accent walls: si hay que cortar un muro, lo que va encima se reubica en su tramo
+			foreach (FaceState f in accentFaces)
+			{
+				using SubTransaction sub = new SubTransaction(_doc);
+				sub.Start();
+				try
+				{
+					ApplyAccent(f);
+					accents++;
+					sub.Commit();
+				}
+				catch (Exception ex)
+				{
+					sub.RollBack();
+					notes.Add("Accent wall in " + ((f.RoomId != 0) ? NameOf(f.RoomId) : PlaceArtworkCommand.WallLabel(f.Face.Wall)) + ": " + ex.Message);
+				}
+			}
 			foreach (KeyValuePair<long, TvTarget> p in _tvPlans.Where((KeyValuePair<long, TvTarget> p) => p.Value.Chosen != null))
 			{
 				Try(NameOf(p.Key), () => _tvPlacer.Place(p.Value.Chosen, out var reason) ?? Fail(reason), ref tvs);
@@ -2172,7 +2443,10 @@ internal class RevitStudioHost : IStudioHost
 			}
 			if (logo != null)
 			{
-				Try("Logo", () => PlaceLogo(logo), ref logos);
+				foreach (FaceState f in logoFaces)
+				{
+					Try("Logo", () => PlaceLogo(logo, f), ref logos);
+				}
 			}
 			status = t.Commit();
 		}
@@ -2188,7 +2462,7 @@ internal class RevitStudioHost : IStudioHost
 		}
 		TaskDialog dialog = new TaskDialog("Room Studio")
 		{
-			MainInstruction = $"Placed {tvs} TV(s) and {arts} artwork piece(s)" + ((logos > 0) ? " and the logo." : "."),
+			MainInstruction = $"Placed {tvs} TV(s), {arts} artwork piece(s)" + ((logos > 0) ? $", {logos} logo(s)" : "") + ((accents > 0) ? $" and {accents} accent wall(s)." : "."),
 			MainContent = (notes.Count == 0) ? "Everything from the plan is in the model and selected, so you can review it." : $"{notes.Count} item(s) couldn't be placed (see details). The rest are selected.",
 			ExpandedContent = string.Join("\n", notes)
 		};
@@ -2215,17 +2489,17 @@ internal class RevitStudioHost : IStudioHost
 
 	private static readonly double LogoWidth = UnitUtils.ConvertToInternalUnits(120.0, UnitTypeId.Centimeters);
 
-	// Arma la familia "Qbiq Logo" con la imagen del cliente; null si no hay imagen o ya hay un logo en el modelo
-	private FamilySymbol BuildLogo(List<string> notes, out bool ready)
+	// Arma la familia "Qbiq Logo" con la imagen del cliente. Sin imagen todavía, con una de reemplazo:
+	// cuando llegue la del cliente, Room Studio o Place Logo la cambian y todos los logos se actualizan
+	private FamilySymbol BuildLogo(List<FaceState> faces, List<string> notes)
 	{
-		ready = false;
-		string image = LogoPlacer.FindLogo(_uidoc.Application, _doc);
+		string image = (_req?.LogoImage != null && System.IO.File.Exists(_req.LogoImage)) ? _req.LogoImage : LogoImage;
 		if (image == null)
 		{
-			notes.Add("Logo: no client logo image found (the Design ID folder or a *_client image). Use Place Logo to pick one.");
-			return null;
+			image = LogoFamily.Placeholder();
+			notes.Add("Logo: no client image yet, so a placeholder went in. When the client sends it, choose it in Room Studio or Place Logo and every logo updates.");
 		}
-		double width = Math.Min(LogoWidth, (_logoFace.Face.U1 - _logoFace.Face.U0) * 0.8);
+		double width = Math.Min(LogoWidth, faces.Min((FaceState f) => f.Face.U1 - f.Face.U0) * 0.8);
 		double height = width * LogoCommand.Aspect(image);
 		try
 		{
@@ -2240,13 +2514,6 @@ internal class RevitStudioHost : IStudioHost
 				LogoFamily.Paint(_doc, _uidoc.Application.Application, symbol, image, width, height);
 				t.Commit();
 			}
-			bool existing = new FilteredElementCollector(_doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().Any((FamilyInstance fi) => fi.Symbol.Family.Id == symbol.Family.Id);
-			if (existing)
-			{
-				notes.Add("Logo: the model already has one, so it was updated with the client image instead of adding another.");
-				return null;
-			}
-			ready = true;
 			return symbol;
 		}
 		catch (Exception ex)
@@ -2256,15 +2523,19 @@ internal class RevitStudioHost : IStudioHost
 		}
 	}
 
-	// Una pieza del logo centrada en su cara, a 1,50 m al centro
-	private FamilyInstance PlaceLogo(FamilySymbol symbol)
+	// Un logo centrado en su cara, a 1,50 m al centro (si ese muro ya tiene uno de ese lado, no se repite)
+	private FamilyInstance PlaceLogo(FamilySymbol symbol, FaceState f)
 	{
 		if (!symbol.IsActive)
 		{
 			symbol.Activate();
 			_doc.Regenerate();
 		}
-		FaceState f = _logoFace;
+		bool already = new FilteredElementCollector(_doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().Any((FamilyInstance fi) => fi.Symbol.Family.Id == symbol.Family.Id && fi.Host?.Id == f.Face.Wall.Id && fi.FacingOrientation.DotProduct(f.Face.Normal) > 0.5);
+		if (already)
+		{
+			return Fail("this wall already has the logo (its image was updated)");
+		}
 		WallPlacer placer = new WallPlacer(_doc, new List<FamilySymbol> { symbol }, UnitUtils.ConvertToInternalUnits(150.0, UnitTypeId.Centimeters), HeightAlign.Center, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters), 0.0, 1, SideMode.Auto, Fmt);
 		FaceRanges ranges = new FaceRanges();
 		ranges.Add(f.Face.Wall.Id, f.Face.Sign, f.Face.U0, f.Face.U1);
@@ -2276,6 +2547,150 @@ internal class RevitStudioHost : IStudioHost
 			return Fail(why.FirstOrDefault() ?? "no free space on the logo wall");
 		}
 		return placer.PlacePiece(piece, out var reason) ?? Fail(reason);
+	}
+
+	// Accent wall: si el muro sigue más allá de este room, se corta para cambiar solo su tramo;
+	// después se pinta la cara con el material o se cambia el tramo al tipo de muro elegido
+	private void ApplyAccent(FaceState f)
+	{
+		Wall wall = f.Face.Wall;
+		Line line = (Line)((LocationCurve)wall.Location).Curve;
+		double len = line.Length;
+		double a = Math.Max(0.0, f.Face.U0);
+		double b = Math.Min(len, f.Face.U1);
+		if (a > 1.0 || b < len - 1.0)
+		{
+			wall = SplitWall(wall, a, b);
+		}
+		_doc.Regenerate();
+		if (_req.AccentMode == AccentMode.WallType)
+		{
+			if (!(_doc.GetElement(new ElementId(_req.AccentWallType)) is WallType type))
+			{
+				throw new InvalidOperationException("pick the accent wall type first");
+			}
+			if (wall.WallType.Id != type.Id)
+			{
+				wall.ChangeTypeId(type.Id);
+			}
+			return;
+		}
+		if (!(_doc.GetElement(new ElementId(_req.AccentMaterial)) is Material material))
+		{
+			throw new InvalidOperationException("pick the accent material first");
+		}
+		IList<Reference> refs = HostObjectUtils.GetSideFaces(wall, (f.Face.Sign > 0) ? ShellLayerType.Exterior : ShellLayerType.Interior);
+		int painted = 0;
+		foreach (Reference r in refs)
+		{
+			if (wall.GetGeometryObjectFromReference(r) is Face face)
+			{
+				_doc.Paint(wall.Id, face, material.Id);
+				painted++;
+			}
+		}
+		if (painted == 0)
+		{
+			throw new InvalidOperationException("couldn't find that face of the wall to paint");
+		}
+	}
+
+	// Corta el muro en [0,a] [a,b] [b,largo]. El original se queda con el tramo que tiene las puertas y ventanas
+	// (si están en más de un tramo no se corta); los otros son copias. Devuelve el muro del tramo [a,b].
+	private Wall SplitWall(Wall wall, double a, double b)
+	{
+		Line line = (Line)((LocationCurve)wall.Location).Curve;
+		double len = line.Length;
+		List<Tuple<double, double>> parts = new List<Tuple<double, double>>();
+		if (a > 1.0)
+		{
+			parts.Add(Tuple.Create(0.0, a));
+		}
+		parts.Add(Tuple.Create(a, b));
+		if (b < len - 1.0)
+		{
+			parts.Add(Tuple.Create(b, len));
+		}
+		// Puertas, ventanas y lo que ya cuelga del muro: ¿en qué tramo está cada uno?
+		XYZ p0 = line.GetEndPoint(0);
+		XYZ d = line.Direction;
+		List<ElementId> hosted = wall.FindInserts(addRectOpenings: true, includeShadows: false, includeEmbeddedWalls: true, includeSharedEmbeddedInserts: true).ToList();
+		hosted.AddRange(new FilteredElementCollector(_doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().Where((FamilyInstance fi) => fi.Host?.Id == wall.Id).Select((FamilyInstance fi) => fi.Id));
+		HashSet<int> used = new HashSet<int>();
+		foreach (ElementId id in hosted.Distinct())
+		{
+			Element e = _doc.GetElement(id);
+			XYZ at = (e?.Location as LocationPoint)?.Point;
+			BoundingBoxXYZ bb = e?.get_BoundingBox(null);
+			if (at == null && bb != null)
+			{
+				at = (bb.Min + bb.Max) / 2.0;
+			}
+			if (at == null)
+			{
+				continue;
+			}
+			double u = (at - p0).DotProduct(d);
+			int k = parts.FindIndex((Tuple<double, double> p) => u >= p.Item1 - 0.05 && u <= p.Item2 + 0.05);
+			used.Add(Math.Max(0, k));
+		}
+		if (used.Count > 1)
+		{
+			throw new InvalidOperationException("the wall runs past this room and has doors or other pieces on more than one stretch, so it wasn't split. Split it by hand and run Room Studio again");
+		}
+		int keep = (used.Count == 1) ? used.First() : parts.FindIndex((Tuple<double, double> p) => p.Item1 == a);
+		Wall[] walls = new Wall[parts.Count];
+		walls[keep] = wall;
+		for (int i = 0; i < parts.Count; i++)
+		{
+			if (i == keep)
+			{
+				continue;
+			}
+			ICollection<ElementId> copied = ElementTransformUtils.CopyElement(_doc, wall.Id, XYZ.Zero);
+			Wall copy = copied.Select((ElementId id) => _doc.GetElement(id)).OfType<Wall>().First();
+			// Las copias no se llevan las puertas ni las piezas: esas siguen en el original
+			List<ElementId> extra = copied.Where((ElementId id) => id != copy.Id).ToList();
+			if (extra.Count > 0)
+			{
+				_doc.Delete(extra);
+			}
+			walls[i] = copy;
+		}
+		for (int i = 0; i < parts.Count; i++)
+		{
+			((LocationCurve)walls[i].Location).Curve = Line.CreateBound(p0 + d * parts[i].Item1, p0 + d * parts[i].Item2);
+		}
+		_doc.Regenerate();
+		// Lo planificado sobre el muro original pasa al tramo que le toca, con su posición en ese tramo
+		for (int i = 0; i < parts.Count; i++)
+		{
+			Remap(wall, parts[i].Item1, parts[i].Item2, walls[i]);
+		}
+		return walls[parts.FindIndex((Tuple<double, double> p) => p.Item1 == a)];
+	}
+
+	private void Remap(Wall original, double from, double to, Wall target)
+	{
+		bool In(double u) => u >= from - 0.01 && u <= to + 0.01;
+		foreach (FaceState f in _faces.Where((FaceState f) => f.Face.Wall.Id == original.Id && In((f.Face.U0 + f.Face.U1) / 2.0)).ToList())
+		{
+			f.Face.Wall = target;
+			f.Face.U0 = Math.Max(0.0, f.Face.U0 - from);
+			f.Face.U1 = Math.Min(to - from, f.Face.U1 - from);
+		}
+		foreach (ArtPlan p in _artPlans.Where((ArtPlan p) => p.Piece.Wall.Id == original.Id && In(p.Piece.Center)).ToList())
+		{
+			p.Piece.Wall = target;
+			p.Piece.Center -= from;
+		}
+		foreach (TvSpot spot in _tvPlans.Values.Select((TvTarget t) => t.Chosen).Where((TvSpot x) => x != null && x.Wall.Id == original.Id && In(x.Center)).ToList())
+		{
+			spot.Wall = target;
+			spot.Center -= from;
+			spot.U0 = Math.Max(0.0, spot.U0 - from);
+			spot.U1 = Math.Min(to - from, spot.U1 - from);
+		}
 	}
 
 	private static FamilyInstance Fail(string reason)

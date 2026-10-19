@@ -47,7 +47,38 @@ public class StudioWindow : Window
 
 	private readonly CheckBox _artInOffices = new CheckBox { Content = "Allow artwork in private offices" };
 
-	private readonly CheckBox _placeLogo = new CheckBox { Content = "Place the client logo" };
+	private readonly CheckBox _placeLogo = new CheckBox { Content = "On the wall facing the main entrance" };
+
+	// Qué hace un clic en un muro del plano: arte, accent wall o logo
+	private enum WallTool
+	{
+		Artwork,
+		Accent,
+		Logo
+	}
+
+	private WallTool _tool;
+
+	private readonly Dictionary<WallTool, Button> _toolButtons = new Dictionary<WallTool, Button>();
+
+	private readonly CheckBox _accentOnTv = new CheckBox { Content = "Accent wall behind the TV in meeting rooms" };
+
+	private readonly RadioButton _accentPaint = new RadioButton { GroupName = "accent", Content = "Paint it", VerticalAlignment = VerticalAlignment.Center };
+
+	private readonly RadioButton _accentType = new RadioButton { GroupName = "accent", Content = "Wall type", VerticalAlignment = VerticalAlignment.Center };
+
+	private readonly ComboBox _accentMaterialBox = new ComboBox();
+
+	private readonly ComboBox _accentTypeBox = new ComboBox();
+
+	// Cantidad de arte: de menos a más
+	private readonly Slider _amount = new Slider { Minimum = 1.0, Maximum = 5.0, TickFrequency = 1.0, IsSnapToTickEnabled = true, TickPlacement = System.Windows.Controls.Primitives.TickPlacement.BottomRight, VerticalAlignment = VerticalAlignment.Center };
+
+	private bool _resuggest;
+
+	private string _logoImage;
+
+	private readonly TextBlock _logoImageText = new TextBlock { TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, FontSize = 12.5 };
 
 	private readonly ComboBox _collectionBox = new ComboBox();
 
@@ -131,6 +162,18 @@ public class StudioWindow : Window
 		_drywallOnly.IsChecked = settings.DrywallOnly;
 		_artInOffices.IsChecked = settings.ArtInOffices;
 		_placeLogo.IsChecked = settings.PlaceLogo;
+		_accentOnTv.IsChecked = settings.AccentOnTv;
+		host.Materials.ForEach((NamedId m) => _accentMaterialBox.Items.Add(m));
+		host.AccentWallTypes.ForEach((NamedId t) => _accentTypeBox.Items.Add(t));
+		// La primera vez, lo que pide el diseño; después, lo último elegido
+		_accentMaterialBox.SelectedItem = host.Materials.FirstOrDefault((NamedId m) => m.Name == settings.AccentMaterial) ?? host.Materials.FirstOrDefault((NamedId m) => m.Id == host.AccentMaterialDefault);
+		_accentTypeBox.SelectedItem = host.AccentWallTypes.FirstOrDefault((NamedId t) => t.Name == settings.AccentWallType) ?? host.AccentWallTypes.FirstOrDefault((NamedId t) => t.Id == host.AccentWallTypeDefault);
+		bool byType = (settings.AccentMaterial == null && settings.AccentWallType == null) ? (host.AccentMaterialDefault < 0 && host.AccentWallTypeDefault >= 0) : settings.AccentMode == AccentMode.WallType;
+		_accentType.IsChecked = byType;
+		_accentPaint.IsChecked = !byType;
+		_amount.Value = Math.Max(1, Math.Min(5, settings.Amount));
+		_logoImage = (settings.LogoImage != null && System.IO.File.Exists(settings.LogoImage)) ? settings.LogoImage : host.LogoImage;
+		ShowLogoImage();
 		foreach (TypeItem t in host.ArtTypes)
 		{
 			t.IsChecked = (settings.ArtChecked.Count > 0) ? settings.ArtChecked.Contains(t.Id) : t.IsChecked;
@@ -222,7 +265,7 @@ public class StudioWindow : Window
 		_plan.MarkerClicked += OnMarker;
 		_plan.MarkerMoved += (m, center) => Run(() => _host.MovePiece(m.Key, center));
 		_plan.AddClicked += (face) => Run(() => _host.AddPiece(face.Key));
-		_plan.FaceClicked += (face) => Run(() => _host.ChangeFace(face.Key));
+		_plan.FaceClicked += (face) => Run(() => (_tool == WallTool.Accent) ? _host.ToggleAccent(face.Key) : ((_tool == WallTool.Logo) ? _host.ToggleLogo(face.Key) : _host.ChangeFace(face.Key)));
 		_suggestButton.Click += (s, e) => Run(() => _host.Suggest());
 		_collectionBox.SelectionChanged += (s, e) =>
 		{
@@ -251,11 +294,23 @@ public class StudioWindow : Window
 			RefreshSelection();
 			Later();
 		};
-		foreach (CheckBox box in new[] { _autoSize, _drywallOnly, _artInOffices, _placeLogo })
+		foreach (CheckBox box in new[] { _autoSize, _drywallOnly, _artInOffices, _placeLogo, _accentOnTv })
 		{
 			box.Checked += (s, e) => Later();
 			box.Unchecked += (s, e) => Later();
 		}
+		foreach (RadioButton radio in new[] { _accentPaint, _accentType })
+		{
+			radio.Checked += (s, e) => Later();
+		}
+		_accentMaterialBox.SelectionChanged += (s, e) => Later();
+		_accentTypeBox.SelectionChanged += (s, e) => Later();
+		// Mover el slider rehace las sugerencias con más o menos piezas
+		_amount.ValueChanged += (s, e) =>
+		{
+			_resuggest = true;
+			Later();
+		};
 		RefreshTypes();
 		RefreshSelection();
 		ShowPlan();
@@ -320,6 +375,7 @@ public class StudioWindow : Window
 		legend.Children.Add(Swatch(Theme.Accent, dashed: false, "Artwork wall"));
 		legend.Children.Add(Swatch(Theme.Dark, dashed: false, "TV wall"));
 		legend.Children.Add(Swatch(Theme.Accent, dashed: true, "Free wall, click to use"));
+		legend.Children.Add(Swatch(PlanView.AccentWallBrush, dashed: false, "Accent wall"));
 		legend.Children.Add(Swatch(Theme.Danger, dashed: false, "Door"));
 		legend.Children.Add(new TextBlock
 		{
@@ -341,6 +397,18 @@ public class StudioWindow : Window
 		view.Children.Add(zoomIn);
 		view.Children.Add(fit);
 		area.Children.Add(view);
+		StackPanel tools = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(12.0) };
+		tools.Children.Add(new TextBlock { Text = "Click walls for", Foreground = Theme.Muted, FontSize = 12.0, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4.0, 0.0, 8.0, 0.0) });
+		foreach (WallTool tool in new[] { WallTool.Artwork, WallTool.Accent, WallTool.Logo })
+		{
+			Button b = new Button { Content = tool.ToString(), Padding = new Thickness(10.0, 5.0, 10.0, 5.0), Margin = new Thickness(0.0, 0.0, 4.0, 0.0), BorderThickness = new Thickness(1.0) };
+			WallTool t = tool;
+			b.Click += (s, e) => SetTool(t);
+			_toolButtons[tool] = b;
+			tools.Children.Add(b);
+		}
+		area.Children.Add(tools);
+		SetTool(WallTool.Artwork);
 		_actionBar.Child = _actionContent;
 		area.Children.Add(_actionBar);
 		return area;
@@ -380,16 +448,6 @@ public class StudioWindow : Window
 		officeNote.FontSize = 12.0;
 		officeNote.Margin = new Thickness(24.0, 2.0, 0.0, 0.0);
 		stack.Children.Add(officeNote);
-		// Solo con el JSON del diseño se sabe qué muro se ve desde la entrada
-		if (_host.HasLogoWall)
-		{
-			_placeLogo.Margin = new Thickness(0.0, 12.0, 0.0, 0.0);
-			stack.Children.Add(_placeLogo);
-			TextBlock logoNote = Theme.Note("On the pink Logo wall, the one you see from the main entrance. Uses the client image like Place Logo, 120 cm wide. Untick to leave that wall free for artwork.");
-			logoNote.FontSize = 12.0;
-			logoNote.Margin = new Thickness(24.0, 2.0, 0.0, 0.0);
-			stack.Children.Add(logoNote);
-		}
 		stack.Children.Add(Section("Artwork"));
 		if (_host.Boards.Count > 0)
 		{
@@ -407,6 +465,17 @@ public class StudioWindow : Window
 		}
 		_typeBox = TypeBox(_artList);
 		stack.Children.Add(_typeBox);
+		Grid amount = new Grid();
+		amount.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+		amount.ColumnDefinitions.Add(new ColumnDefinition());
+		amount.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+		amount.Children.Add(new TextBlock { Text = "Fewer", Foreground = Theme.Muted, FontSize = 12.0, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0.0, 0.0, 8.0, 0.0) });
+		Grid.SetColumn(_amount, 1);
+		amount.Children.Add(_amount);
+		TextBlock more = new TextBlock { Text = "More", Foreground = Theme.Muted, FontSize = 12.0, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8.0, 0.0, 0.0, 0.0) };
+		Grid.SetColumn(more, 2);
+		amount.Children.Add(more);
+		stack.Children.Add(Field("Amount of artwork (redoes the suggestions)", amount));
 		ShowClient();
 		stack.Children.Add(Field("Height", Pair(_alignBox, _heightBox)));
 		stack.Children.Add(Field("Clear of doors and corners", _clearBox));
@@ -417,6 +486,30 @@ public class StudioWindow : Window
 		stack.Children.Add(Field("Bottom edge height", _tvBottomBox));
 		_autoSize.Margin = new Thickness(0.0, 10.0, 0.0, 0.0);
 		stack.Children.Add(_autoSize);
+		// Logo: el muro de la entrada (con JSON), más los que se marquen; la imagen se puede elegir después
+		stack.Children.Add(SectionTitle("Logo"));
+		if (_host.HasLogoWall)
+		{
+			stack.Children.Add(_placeLogo);
+		}
+		DockPanel image = new DockPanel { Margin = new Thickness(0.0, 8.0, 0.0, 0.0) };
+		Button choose = new Button { Content = "Choose image…", Style = Theme.Get("Link"), Margin = new Thickness(8.0, 0.0, -6.0, 0.0) };
+		choose.Click += (s, e) => BrowseLogo();
+		DockPanel.SetDock(choose, Dock.Right);
+		image.Children.Add(choose);
+		image.Children.Add(_logoImageText);
+		stack.Children.Add(image);
+		stack.Children.Add(SmallNote("Pick Logo above the plan and click walls to add or take off a logo. No image yet? A placeholder goes in; choose the client's image later, here or in Place Logo, and every logo updates."));
+		// Accent walls
+		stack.Children.Add(SectionTitle("Accent walls"));
+		stack.Children.Add(_accentOnTv);
+		stack.Children.Add(Pick(_accentPaint, _accentMaterialBox));
+		stack.Children.Add(Pick(_accentType, _accentTypeBox));
+		if (_host.AccentNote != null)
+		{
+			stack.Children.Add(SmallNote(_host.AccentNote));
+		}
+		stack.Children.Add(SmallNote("Pick Accent above the plan and click walls to add or take one off. If a wall runs past the room, it's split so only that room's stretch changes."));
 		return new Border
 		{
 			Width = 380.0,
@@ -430,6 +523,70 @@ public class StudioWindow : Window
 				Content = stack
 			}
 		};
+	}
+
+	private static TextBlock SectionTitle(string title)
+	{
+		return new TextBlock { Text = title, FontSize = 14.0, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0.0, 26.0, 0.0, 8.0) };
+	}
+
+	private static TextBlock SmallNote(string text)
+	{
+		TextBlock note = Theme.Note(text);
+		note.FontSize = 12.0;
+		note.Margin = new Thickness(0.0, 6.0, 0.0, 0.0);
+		return note;
+	}
+
+	// Una opción con su lista al lado
+	private static Grid Pick(RadioButton option, ComboBox box)
+	{
+		Grid g = new Grid { Margin = new Thickness(0.0, 8.0, 0.0, 0.0) };
+		g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(96.0) });
+		g.ColumnDefinitions.Add(new ColumnDefinition());
+		g.Children.Add(option);
+		Grid.SetColumn(box, 1);
+		g.Children.Add(box);
+		return g;
+	}
+
+	private void ShowLogoImage()
+	{
+		_logoImageText.Text = (_logoImage != null) ? System.IO.Path.GetFileName(_logoImage) : "No client logo yet (a placeholder goes in)";
+		_logoImageText.Foreground = (_logoImage != null) ? Theme.Ink : Theme.Muted;
+		_logoImageText.ToolTip = _logoImage;
+	}
+
+	private void BrowseLogo()
+	{
+		OpenFileDialog dlg = new OpenFileDialog
+		{
+			Filter = "Images (*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff)|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff",
+			Title = "Choose the client logo"
+		};
+		if (_logoImage != null)
+		{
+			dlg.InitialDirectory = System.IO.Path.GetDirectoryName(_logoImage);
+		}
+		if (dlg.ShowDialog(this) == true)
+		{
+			_logoImage = dlg.FileName;
+			ShowLogoImage();
+			Later();
+		}
+	}
+
+	private void SetTool(WallTool tool)
+	{
+		_tool = tool;
+		foreach (KeyValuePair<WallTool, Button> kv in _toolButtons)
+		{
+			kv.Value.Background = (kv.Key == tool) ? Theme.AccentSoft : Theme.Panel;
+			kv.Value.BorderBrush = (kv.Key == tool) ? Theme.Accent : Theme.LineStrong;
+			kv.Value.Foreground = (kv.Key == tool) ? Theme.AccentStrong : Theme.Ink;
+		}
+		_status.Foreground = Theme.Muted;
+		_status.Text = (tool == WallTool.Accent) ? "Click walls to add or take off an accent wall." : ((tool == WallTool.Logo) ? "Click walls to add or take off the logo." : "Click walls to add or take off artwork.");
 	}
 
 	private UIElement Section(string title)
@@ -566,9 +723,10 @@ public class StudioWindow : Window
 	{
 		_replan.Stop();
 		StudioRequest req = BuildRequest();
-		if (req != null)
+		if (req != null && Run(() => _host.Plan(req)) && _resuggest)
 		{
-			Run(() => _host.Plan(req));
+			_resuggest = false;
+			Run(() => _host.Resuggest());
 		}
 	}
 
@@ -917,7 +1075,7 @@ public class StudioWindow : Window
 		g.Children.Add(thumb);
 		StackPanel text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
 		text.Children.Add(new TextBlock { Text = (type.Length > 0) ? type : family, FontWeight = FontWeights.Medium, TextTrimming = TextTrimming.CharacterEllipsis });
-		text.Children.Add(new TextBlock { Text = (type.Length > 0) ? family : item.Kind, Foreground = Theme.Muted, FontSize = 11.5, TextTrimming = TextTrimming.CharacterEllipsis });
+		text.Children.Add(new TextBlock { Text = ((item.Size != null) ? (item.Size + " · ") : "") + ((type.Length > 0) ? family : item.Kind), Foreground = Theme.Muted, FontSize = 11.5, TextTrimming = TextTrimming.CharacterEllipsis });
 		Grid.SetColumn(text, 2);
 		g.Children.Add(text);
 		Border row = Row(g);
@@ -1023,6 +1181,12 @@ public class StudioWindow : Window
 			DrywallOnly = _drywallOnly.IsChecked == true,
 			ArtInOffices = _artInOffices.IsChecked == true,
 			PlaceLogo = _host.HasLogoWall && _placeLogo.IsChecked == true,
+			LogoImage = _logoImage,
+			AccentOnTv = _accentOnTv.IsChecked == true,
+			AccentMode = (_accentType.IsChecked == true) ? AccentMode.WallType : AccentMode.Paint,
+			AccentMaterial = (_accentMaterialBox.SelectedItem as NamedId)?.Id ?? -1L,
+			AccentWallType = (_accentTypeBox.SelectedItem as NamedId)?.Id ?? -1L,
+			Amount = (int)Math.Round(_amount.Value),
 			RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection),
 			Client = SelectedClient?.Name,
 			RoomZones = AllRooms.Where((PlanRoom r) => r.Zone.HasValue).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Zone.Value)
@@ -1118,6 +1282,12 @@ public class StudioWindow : Window
 		_settings.DrywallOnly = _drywallOnly.IsChecked == true;
 		_settings.ArtInOffices = _artInOffices.IsChecked == true;
 		_settings.PlaceLogo = _placeLogo.IsChecked == true;
+		_settings.LogoImage = _logoImage;
+		_settings.AccentOnTv = _accentOnTv.IsChecked == true;
+		_settings.AccentMode = (_accentType.IsChecked == true) ? AccentMode.WallType : AccentMode.Paint;
+		_settings.AccentMaterial = (_accentMaterialBox.SelectedItem as NamedId)?.Name;
+		_settings.AccentWallType = (_accentTypeBox.SelectedItem as NamedId)?.Name;
+		_settings.Amount = (int)Math.Round(_amount.Value);
 		_settings.Collection = (_collectionBox.SelectedIndex > 0) ? _host.Collections[_collectionBox.SelectedIndex - 1].Name : null;
 		_settings.RoomCollections = AllRooms.Where((PlanRoom r) => r.Collection != null).ToDictionary((PlanRoom r) => r.Id, (PlanRoom r) => r.Collection);
 		_settings.Client = SelectedClient?.Name;

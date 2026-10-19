@@ -59,6 +59,25 @@ public class PlanDoor
 	public double Thickness;
 }
 
+// Un material o tipo de muro para elegir en una lista
+public class NamedId
+{
+	public long Id;
+
+	public string Name;
+
+	public override string ToString()
+	{
+		return Name;
+	}
+}
+
+public enum AccentMode
+{
+	Paint,
+	WallType
+}
+
 public class PlanLevel
 {
 	public long Id;
@@ -133,6 +152,8 @@ public class PlanFace
 
 	public bool Logo;
 
+	public bool Accent;
+
 	public bool On;
 
 	public bool Suggested;
@@ -151,6 +172,20 @@ public class StudioRequest
 	public bool ArtInOffices;
 
 	public bool PlaceLogo;
+
+	public string LogoImage;
+
+	// Accent wall: detrás de la TV en salas de reunión, pintado o cambiando el tipo de muro
+	public bool AccentOnTv = true;
+
+	public AccentMode AccentMode;
+
+	public long AccentMaterial = -1L;
+
+	public long AccentWallType = -1L;
+
+	// Cantidad de arte: 1 (menos) a 5 (más), 3 = normal
+	public int Amount = 3;
 
 	public Dictionary<long, string> RoomCollections = new Dictionary<long, string>();
 
@@ -212,6 +247,24 @@ public interface IStudioHost
 
 	bool HasLogoWall { get; }
 
+	string LogoImage { get; }
+
+	List<NamedId> Materials { get; }
+
+	List<NamedId> AccentWallTypes { get; }
+
+	long AccentMaterialDefault { get; }
+
+	long AccentWallTypeDefault { get; }
+
+	string AccentNote { get; }
+
+	PreviewResult ToggleAccent(int faceKey);
+
+	PreviewResult ToggleLogo(int faceKey);
+
+	PreviewResult Resuggest();
+
 	Thumb Thumb(long typeId);
 
 	double? ParseLength(string text);
@@ -266,6 +319,18 @@ public class StudioSettings
 	public bool ArtInOffices;
 
 	public bool PlaceLogo = true;
+
+	public string LogoImage;
+
+	public bool AccentOnTv = true;
+
+	public AccentMode AccentMode;
+
+	public string AccentMaterial;
+
+	public string AccentWallType;
+
+	public int Amount = 3;
 
 	public string Collection;
 

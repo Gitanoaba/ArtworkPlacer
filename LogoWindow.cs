@@ -20,6 +20,9 @@ public class LogoWindow : Window
 
 	private readonly RadioButton _selected = new RadioButton { GroupName = "where" };
 
+	// Solo cambiar la imagen de los logos que ya están (p. ej. el de reemplazo, cuando llega el del cliente)
+	private readonly RadioButton _update = new RadioButton { GroupName = "where" };
+
 	private readonly TextBox _widthBox = new TextBox();
 
 	private readonly TextBox _heightBox = new TextBox();
@@ -30,11 +33,13 @@ public class LogoWindow : Window
 
 	public bool UseReception => _reception.IsChecked == true;
 
+	public bool UpdateOnly => _update.IsChecked == true;
+
 	public double LogoWidth { get; private set; }
 
 	public double CenterHeight { get; private set; }
 
-	public LogoWindow(string logoPath, string receptionNames, int selectedWalls, string widthText, string heightText, Func<string, double?> parse)
+	public LogoWindow(string logoPath, string receptionNames, int selectedWalls, string widthText, string heightText, Func<string, double?> parse, int existing = 0)
 	{
 		_parse = parse;
 		Title = "Place Logo";
@@ -70,6 +75,14 @@ public class LogoWindow : Window
 		_selected.Margin = new Thickness(0.0, 6.0, 0.0, 0.0);
 		_selected.IsChecked = selectedWalls > 0;
 		_reception.IsChecked = selectedWalls == 0 && receptionNames != null;
+		_update.Content = $"Only change the image of the {existing} logo(s) already in the model";
+		_update.Visibility = (existing > 0) ? Visibility.Visible : Visibility.Collapsed;
+		_update.Margin = new Thickness(0.0, 6.0, 0.0, 0.0);
+		if (existing > 0 && selectedWalls == 0)
+		{
+			_update.IsChecked = true;
+		}
+		body.Children.Add(_update);
 		body.Children.Add(_reception);
 		body.Children.Add(_selected);
 
@@ -168,7 +181,7 @@ public class LogoWindow : Window
 			_status.Text = "Choose the logo image first.";
 			return;
 		}
-		if (_reception.IsChecked != true && _selected.IsChecked != true)
+		if (_reception.IsChecked != true && _selected.IsChecked != true && _update.IsChecked != true)
 		{
 			_status.Text = "Choose where the logo goes. To use your own walls, close this, select them, and open Place Logo again.";
 			return;

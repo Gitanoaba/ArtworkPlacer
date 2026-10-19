@@ -26,6 +26,10 @@ public class PlanView : FrameworkElement
 
 	private static readonly Pen SeparatorPen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(160, 166, 176))), 1.2) { DashStyle = new DashStyle(new double[] { 4, 3 }, 0) });
 
+	public static readonly Brush AccentWallBrush = Freeze(new SolidColorBrush(Color.FromRgb(232, 145, 40)));
+
+	private static readonly Pen AccentWallPen = Freeze(new Pen(AccentWallBrush, 5.0) { StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat });
+
 	private static readonly Brush CoreFill = Freeze(new SolidColorBrush(Color.FromArgb(150, 168, 172, 180)));
 
 	private static readonly Pen LogoPen = Freeze(new Pen(Freeze(new SolidColorBrush(Color.FromRgb(214, 51, 132))), 3.0) { StartLineCap = PenLineCap.Flat, EndLineCap = PenLineCap.Flat });
@@ -225,6 +229,12 @@ public class PlanView : FrameworkElement
 		{
 			dc.DrawGeometry(null, SelectPen, RoomGeometry(room));
 		}
+		// Accent walls: línea naranja gruesa por detrás de la cara
+		foreach (PlanFace f in _faces.Where((PlanFace f) => f.LevelId == _level.Id && f.Accent))
+		{
+			Point[] l = FaceLine(f);
+			dc.DrawLine(AccentWallPen, l[0], l[1]);
+		}
 		foreach (PlanFace f in _faces.Where((PlanFace f) => f.LevelId == _level.Id && (f.Allowed || f == _hoverFace)))
 		{
 			DrawFace(dc, f);
@@ -369,14 +379,19 @@ public class PlanView : FrameworkElement
 
 	private string FaceHint(PlanFace f)
 	{
+		string accent = f.Accent ? "Accent wall. " : "";
 		if (!f.Allowed)
 		{
-			return (f.Reason ?? "Nothing goes here") + ".";
+			return accent + (f.Reason ?? "Nothing goes here") + ".";
+		}
+		if (f.Accent && !f.On && !f.TvWall && !f.Logo)
+		{
+			return accent + "Click to put artwork here too.";
 		}
 		bool tvRoom = UseOf(f.RoomId) == RoomUse.Tv;
 		if (f.TvWall)
 		{
-			return "The TV is on this wall. Click the TV to move it.";
+			return accent + "The TV is on this wall. Click the TV to move it.";
 		}
 		string logo = f.Logo ? "Logo wall: the one you see from the main entrance; Place Logo puts the logo here. " : "";
 		if (f.Logo && !f.On)
