@@ -23,6 +23,13 @@ public class LogoWindow : Window
 	// Solo cambiar la imagen de los logos que ya están (p. ej. el de reemplazo, cuando llega el del cliente)
 	private readonly RadioButton _update = new RadioButton { GroupName = "where" };
 
+	// Elegir los muros en un mapa del piso
+	private readonly RadioButton _map = new RadioButton { GroupName = "where", Content = "Walls I pick on the plan" };
+
+	private readonly Func<int> _pickOnMap;
+
+	private int _mapCount;
+
 	private readonly TextBox _widthBox = new TextBox();
 
 	private readonly TextBox _heightBox = new TextBox();
@@ -35,13 +42,16 @@ public class LogoWindow : Window
 
 	public bool UpdateOnly => _update.IsChecked == true;
 
+	public bool UseMap => _map.IsChecked == true;
+
 	public double LogoWidth { get; private set; }
 
 	public double CenterHeight { get; private set; }
 
-	public LogoWindow(string logoPath, string receptionNames, int selectedWalls, string widthText, string heightText, Func<string, double?> parse, int existing = 0)
+	public LogoWindow(string logoPath, string receptionNames, int selectedWalls, string widthText, string heightText, Func<string, double?> parse, int existing = 0, Func<int> pickOnMap = null)
 	{
 		_parse = parse;
+		_pickOnMap = pickOnMap;
 		Title = "Place Logo";
 		Width = 560.0;
 		SizeToContent = SizeToContent.Height;
@@ -85,6 +95,22 @@ public class LogoWindow : Window
 		body.Children.Add(_update);
 		body.Children.Add(_reception);
 		body.Children.Add(_selected);
+		if (pickOnMap != null)
+		{
+			StackPanel mapRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0.0, 6.0, 0.0, 0.0) };
+			mapRow.Children.Add(_map);
+			Button open = new Button { Content = "Pick on the plan…", Style = Theme.Get("Link"), Margin = new Thickness(8.0, -3.0, 0.0, 0.0), VerticalAlignment = VerticalAlignment.Center };
+			open.Click += (s, e) => PickOnMap();
+			mapRow.Children.Add(open);
+			body.Children.Add(mapRow);
+			_map.Checked += (s, e) =>
+			{
+				if (_mapCount == 0)
+				{
+					PickOnMap();
+				}
+			};
+		}
 
 		Grid size = new Grid { Margin = new Thickness(0.0, 16.0, 0.0, 0.0) };
 		size.ColumnDefinitions.Add(new ColumnDefinition());
@@ -157,6 +183,23 @@ public class LogoWindow : Window
 		}
 	}
 
+	private void PickOnMap()
+	{
+		int n = _pickOnMap();
+		if (n < 0)
+		{
+			if (_mapCount == 0)
+			{
+				_map.IsChecked = false;
+			}
+			return;
+		}
+		_mapCount = n;
+		_map.Content = (n > 0) ? $"The {n} wall(s) I picked on the plan" : "Walls I pick on the plan";
+		_map.IsChecked = n > 0;
+		_status.Text = "";
+	}
+
 	private void Browse()
 	{
 		OpenFileDialog dlg = new OpenFileDialog
@@ -181,7 +224,12 @@ public class LogoWindow : Window
 			_status.Text = "Choose the logo image first.";
 			return;
 		}
-		if (_reception.IsChecked != true && _selected.IsChecked != true && _update.IsChecked != true)
+		if (_map.IsChecked == true && _mapCount == 0)
+		{
+			_status.Text = "Pick at least one wall on the plan.";
+			return;
+		}
+		if (_reception.IsChecked != true && _selected.IsChecked != true && _update.IsChecked != true && _map.IsChecked != true)
 		{
 			_status.Text = "Choose where the logo goes. To use your own walls, close this, select them, and open Place Logo again.";
 			return;

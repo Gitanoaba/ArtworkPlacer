@@ -54,6 +54,9 @@ public class PlanView : FrameworkElement
 
 	public event Action<PlanFace> FaceClicked;
 
+	// Texto del tooltip de una cara, si la ventana quiere otro (p. ej. el mapa del logo)
+	public Func<PlanFace, string> HintFor;
+
 	private double _scale = 10.0;
 
 	private Vector _offset;
@@ -275,7 +278,7 @@ public class PlanView : FrameworkElement
 		}
 		else if (_hoverFace != null)
 		{
-			DrawTip(dc, _hoverFace.Title, _hoverFace.WallType + (_hoverFace.Core ? ", core wall. " : ". ") + FaceHint(_hoverFace), dpi);
+			DrawTip(dc, _hoverFace.Title, _hoverFace.WallType + (_hoverFace.Core ? ", core wall. " : ". ") + (HintFor?.Invoke(_hoverFace) ?? FaceHint(_hoverFace)), dpi);
 		}
 	}
 

@@ -48,7 +48,43 @@ public class LogoCommand : IExternalCommand
 		}
 
 		int existingLogos = new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().Count((FamilyInstance fi) => fi.Symbol.FamilyName == LogoFamily.FamilyName);
-		LogoWindow window = new LogoWindow(LogoPlacer.FindLogo(uiapp, doc), receptionNames, walls.Count, _widthText, _heightText, parse, existingLogos);
+		// Mapa del piso (los mismos rooms que Room Studio, con el JSON si se cargó) para elegir los muros
+		RevitStudioHost host = null;
+		List<LogoTarget> picked = new List<LogoTarget>();
+		LogoWindow window = null;
+		Func<int> pickOnMap = delegate
+		{
+			try
+			{
+				if (host == null)
+				{
+					host = new RevitStudioHost(uidoc, uiapp.Application.VersionNumber, StudioCommand.RememberedLayout(doc));
+				}
+				List<PlanFace> faces = host.Plan(new StudioRequest { DrywallOnly = false }).Faces;
+				List<int> pre = faces.Where(delegate(PlanFace f)
+				{
+					LogoTarget t = host.TargetOf(f.Key);
+					return t != null && picked.Any((LogoTarget p) => p.WallId == t.WallId && p.Sign == t.Sign && Math.Abs(p.U0 - t.U0) < 0.01);
+				}).Select((PlanFace f) => f.Key).ToList();
+				if (pre.Count == 0 && picked.Count == 0 && host.LogoFaceKey >= 0)
+				{
+					pre.Add(host.LogoFaceKey);
+				}
+				LogoMapWindow map = new LogoMapWindow(host.Levels, host.StartLevel, faces, pre) { Owner = window };
+				if (map.ShowDialog() != true)
+				{
+					return -1;
+				}
+				picked = map.Picked.Select(host.TargetOf).Where((LogoTarget t) => t != null).ToList();
+				return picked.Count;
+			}
+			catch (Exception ex)
+			{
+				TaskDialog.Show(ToolName, "Couldn't open the plan: " + ex.Message);
+				return -1;
+			}
+		};
+		window = new LogoWindow(LogoPlacer.FindLogo(uiapp, doc), receptionNames, walls.Count, _widthText, _heightText, parse, existingLogos, pickOnMap);
 		if (window.ShowDialog() != true)
 		{
 			return Result.Cancelled;
@@ -58,8 +94,31 @@ public class LogoCommand : IExternalCommand
 		double width = window.LogoWidth;
 		double height = width * Aspect(window.LogoPath);
 
-		// 1. El muro: la recepción (el tramo libre más largo) o los muros seleccionados
+		// 1. El muro: la recepción (el tramo libre más largo), los muros elegidos en el mapa o los seleccionados
 		Dictionary<ElementId, List<int>> choice = new Dictionary<ElementId, List<int>>();
+		FaceRanges mapRanges = null;
+		if (window.UseMap)
+		{
+			mapRanges = new FaceRanges();
+			walls = new List<Wall>();
+			foreach (LogoTarget p in picked)
+			{
+				if (!(doc.GetElement(new ElementId(p.WallId)) is Wall w))
+				{
+					continue;
+				}
+				if (!choice.TryGetValue(w.Id, out var signs))
+				{
+					signs = (choice[w.Id] = new List<int>());
+					walls.Add(w);
+				}
+				if (!signs.Contains(p.Sign))
+				{
+					signs.Add(p.Sign);
+				}
+				mapRanges.Add(w.Id, p.Sign, p.U0, p.U1);
+			}
+		}
 		if (window.UseReception)
 		{
 			LogoPlacer finder = new LogoPlacer(doc, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters));
@@ -111,6 +170,8 @@ public class LogoCommand : IExternalCommand
 
 		// 3. Colocar como el artwork: una pieza por cara, centrada, con vista previa de la cara
 		WallPlacer placer = new WallPlacer(doc, new List<FamilySymbol> { symbol }, window.CenterHeight, HeightAlign.Center, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters), 0.0, 1, SideMode.Auto, Fmt);
+		// Del mapa: solo en el tramo de cada cara elegida (el lado ya está elegido, no hace falta la vista previa)
+		placer.Ranges = mapRanges;
 		List<string> skipped = new List<string>();
 		foreach (Wall wall in walls.Where((Wall w) => !choice.ContainsKey(w.Id)).ToList())
 		{
@@ -130,7 +191,7 @@ public class LogoCommand : IExternalCommand
 			TaskDialog.Show(ToolName, "None of the selected walls can take the logo:\n\n" + string.Join("\n", skipped));
 			return Result.Cancelled;
 		}
-		if (!new SidePreview(uidoc, placer, walls, choice, ToolName).Run())
+		if (!window.UseMap && !new SidePreview(uidoc, placer, walls, choice, ToolName).Run())
 		{
 			return Result.Cancelled;
 		}

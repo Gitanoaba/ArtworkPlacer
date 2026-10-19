@@ -78,6 +78,12 @@ public class StudioCommand : IExternalCommand
 		}
 	}
 
+	// El JSON del diseño que Room Studio usó en este proyecto (null si ninguno)
+	internal static DesignLayout RememberedLayout(Document doc)
+	{
+		return (_settings.Layouts.TryGetValue(DocKey(doc), out var path) && File.Exists(path)) ? TryRead(path) : null;
+	}
+
 	public static string DocKey(Document doc)
 	{
 		return string.IsNullOrEmpty(doc.PathName) ? doc.Title : doc.PathName;

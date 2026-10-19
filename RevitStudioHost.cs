@@ -199,6 +199,22 @@ internal class RevitStudioHost : IStudioHost
 
 	public bool HasLogoWall => _logoFace != null;
 
+	public int LogoFaceKey => _logoFace?.Key ?? -1;
+
+	// Muro, lado y tramo de una cara del plano (para Place Logo)
+	public LogoTarget TargetOf(int faceKey)
+	{
+		FaceState f = _faces.FirstOrDefault((FaceState x) => x.Key == faceKey);
+		return (f == null) ? null : new LogoTarget
+		{
+			WallId = f.Face.Wall.Id.Value,
+			Sign = f.Face.Sign,
+			U0 = f.Face.U0,
+			U1 = f.Face.U1,
+			Room = (f.RoomId != 0) ? NameOf(f.RoomId) : null
+		};
+	}
+
 	// Muros con logo: el que se ve desde la entrada (si el usuario lo quiere) y los que marque a mano
 	private readonly HashSet<int> _logoOn = new HashSet<int>();
 
