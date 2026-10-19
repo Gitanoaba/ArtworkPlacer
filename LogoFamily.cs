@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -18,6 +19,32 @@ internal static class LogoFamily
 	private const string MaterialName = "Qbiq Logo";
 
 	private const string MaterialParam = "Logo Material";
+
+	private const string WidthParam = "Logo Width";
+
+	private const string HeightParam = "Logo Height";
+
+	// Tamaños que trae la familia como tipos: en Revit se cambia el tamaño eligiendo otro tipo
+	private static readonly double[] SizesCm = { 60.0, 90.0, 120.0, 150.0, 200.0, 250.0 };
+
+	public static string TypeName(double widthFeet)
+	{
+		return $"Logo {Math.Round(UnitUtils.ConvertFromInternalUnits(widthFeet, UnitTypeId.Centimeters))} cm";
+	}
+
+	// Alto / ancho de la imagen, para que el logo tenga su proporción
+	public static double Aspect(string path)
+	{
+		try
+		{
+			using System.Drawing.Image img = System.Drawing.Image.FromFile(path);
+			return (img.Width > 0) ? ((double)img.Height / img.Width) : 1.0;
+		}
+		catch
+		{
+			return 1.0;
+		}
+	}
 
 	// La pieza se hunde 9 mm en el muro y sobresale ~1 mm: con un PNG recortado, por el hueco se ve el muro
 	// y no la cara trasera de la pieza (que lleva la imagen espejada)
@@ -80,23 +107,33 @@ internal static class LogoFamily
 			using (Transaction t = new Transaction(fam, "Qbiq Logo"))
 			{
 				t.Start();
-				// Desde el origen hacia +X/+Y: la textura empieza en la esquina de la pieza, sin desfase
-				CurveArray loop = new CurveArray();
-				XYZ[] p = { new XYZ(0.0, 0.0, -Back), new XYZ(w, 0.0, -Back), new XYZ(w, h, -Back), new XYZ(0.0, h, -Back) };
-				for (int i = 0; i < 4; i++)
+				FamilyManager fm = fam.FamilyManager;
+				if (fm.Types.Size == 0)
 				{
-					loop.Append(Line.CreateBound(p[i], p[(i + 1) % 4]));
+					fm.NewType(TypeName(w));
 				}
-				CurveArrArray profile = new CurveArrArray();
-				profile.Append(loop);
-				SketchPlane plane = SketchPlane.Create(fam, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, new XYZ(0.0, 0.0, -Back)));
-				Extrusion ex = fam.FamilyCreate.NewExtrusion(true, profile, plane, Back + Proud);
-				if (fam.FamilyManager.Types.Size == 0)
+				else
 				{
-					fam.FamilyManager.NewType("Logo");
+					fm.RenameCurrentType(TypeName(w));
 				}
-				FamilyParameter mat = fam.FamilyManager.AddParameter(MaterialParam, GroupTypeId.Materials, SpecTypeId.Reference.Material, false);
-				fam.FamilyManager.AssociateElementParameterToFamilyParameter(ex.get_Parameter(BuiltInParameter.MATERIAL_ID_PARAM), mat);
+				FamilyParameter mat = fm.AddParameter(MaterialParam, GroupTypeId.Materials, SpecTypeId.Reference.Material, false);
+				Extrusion ex;
+				using (SubTransaction sizes = new SubTransaction(fam))
+				{
+					sizes.Start();
+					try
+					{
+						ex = Sized(fam, w, h, mat);
+						sizes.Commit();
+					}
+					catch
+					{
+						// Sin tipos por tamaño: un rectángulo fijo, como antes
+						sizes.RollBack();
+						ex = Rectangle(fam, w, h);
+						fm.AssociateElementParameterToFamilyParameter(ex.get_Parameter(BuiltInParameter.MATERIAL_ID_PARAM), mat);
+					}
+				}
 				t.Commit();
 			}
 			// Guardarla primero le da el nombre "Qbiq Logo"; después el documento se carga a sí mismo en el proyecto
@@ -116,16 +153,102 @@ internal static class LogoFamily
 			{
 				throw new InvalidOperationException("Revit didn't load the logo family into the project" + ((why != null) ? (": " + why) : " (no reason given)"));
 			}
-			ElementId typeId = loaded.GetFamilySymbolIds().FirstOrDefault();
-			if (typeId == null)
+			List<FamilySymbol> types = loaded.GetFamilySymbolIds().Select((ElementId id) => doc.GetElement(id)).OfType<FamilySymbol>().ToList();
+			if (types.Count == 0)
 			{
 				throw new InvalidOperationException("the logo family loaded with no types");
 			}
-			return doc.GetElement(typeId) as FamilySymbol;
+			return types.FirstOrDefault((FamilySymbol s) => s.Name == TypeName(w)) ?? types.First();
 		}
 		finally
 		{
 			fam.Close(false);
+		}
+	}
+
+	// Desde el origen hacia +X/+Y: la textura empieza en la esquina de la pieza, sin desfase
+	private static Extrusion Rectangle(Document fam, double w, double h)
+	{
+		CurveArray loop = new CurveArray();
+		XYZ[] p = { new XYZ(0.0, 0.0, -Back), new XYZ(w, 0.0, -Back), new XYZ(w, h, -Back), new XYZ(0.0, h, -Back) };
+		for (int i = 0; i < 4; i++)
+		{
+			loop.Append(Line.CreateBound(p[i], p[(i + 1) % 4]));
+		}
+		CurveArrArray profile = new CurveArrArray();
+		profile.Append(loop);
+		SketchPlane plane = SketchPlane.Create(fam, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, new XYZ(0.0, 0.0, -Back)));
+		return fam.FamilyCreate.NewExtrusion(true, profile, plane, Back + Proud);
+	}
+
+	// El rectángulo atado a planos de referencia con "Logo Width" y "Logo Height", y un tipo por cada tamaño
+	private static Extrusion Sized(Document fam, double w, double h, FamilyParameter mat)
+	{
+		FamilyManager fm = fam.FamilyManager;
+		View view = new FilteredElementCollector(fam).OfClass(typeof(ViewPlan)).Cast<ViewPlan>().First((ViewPlan v) => !v.IsTemplate);
+		List<ReferencePlane> planes = new FilteredElementCollector(fam).OfClass(typeof(ReferencePlane)).Cast<ReferencePlane>().ToList();
+		ReferencePlane left = planes.First((ReferencePlane r) => Math.Abs(Math.Abs(r.Normal.X) - 1.0) < 1E-06 && Math.Abs(r.BubbleEnd.X) < 1E-06);
+		ReferencePlane bottom = planes.First((ReferencePlane r) => Math.Abs(Math.Abs(r.Normal.Y) - 1.0) < 1E-06 && Math.Abs(r.BubbleEnd.Y) < 1E-06);
+		ReferencePlane right = fam.FamilyCreate.NewReferencePlane(new XYZ(w, -1.0, 0.0), new XYZ(w, 1.0, 0.0), XYZ.BasisZ, view);
+		right.Name = "Logo Right";
+		ReferencePlane top = fam.FamilyCreate.NewReferencePlane(new XYZ(-1.0, h, 0.0), new XYZ(1.0, h, 0.0), XYZ.BasisZ, view);
+		top.Name = "Logo Top";
+		Extrusion ex = Rectangle(fam, w, h);
+		fm.AssociateElementParameterToFamilyParameter(ex.get_Parameter(BuiltInParameter.MATERIAL_ID_PARAM), mat);
+		fam.Regenerate();
+		// Cada cara lateral alineada (y bloqueada) a su plano
+		List<PlanarFace> faces = ex.get_Geometry(new Options { ComputeReferences = true, IncludeNonVisibleObjects = true }).OfType<Solid>().SelectMany((Solid sol) => sol.Faces.OfType<PlanarFace>()).ToList();
+		PlanarFace Side(XYZ n) => faces.First((PlanarFace f) => f.FaceNormal.IsAlmostEqualTo(n));
+		fam.FamilyCreate.NewAlignment(view, left.GetReference(), Side(-XYZ.BasisX).Reference).IsLocked = true;
+		fam.FamilyCreate.NewAlignment(view, right.GetReference(), Side(XYZ.BasisX).Reference).IsLocked = true;
+		fam.FamilyCreate.NewAlignment(view, bottom.GetReference(), Side(-XYZ.BasisY).Reference).IsLocked = true;
+		fam.FamilyCreate.NewAlignment(view, top.GetReference(), Side(XYZ.BasisY).Reference).IsLocked = true;
+		FamilyParameter pw = fm.AddParameter(WidthParam, GroupTypeId.Geometry, SpecTypeId.Length, false);
+		FamilyParameter ph = fm.AddParameter(HeightParam, GroupTypeId.Geometry, SpecTypeId.Length, false);
+		ReferenceArray across = new ReferenceArray();
+		across.Append(left.GetReference());
+		across.Append(right.GetReference());
+		fam.FamilyCreate.NewLinearDimension(view, Line.CreateBound(new XYZ(0.0, -0.5, 0.0), new XYZ(w, -0.5, 0.0)), across).FamilyLabel = pw;
+		ReferenceArray up = new ReferenceArray();
+		up.Append(bottom.GetReference());
+		up.Append(top.GetReference());
+		fam.FamilyCreate.NewLinearDimension(view, Line.CreateBound(new XYZ(-0.5, 0.0, 0.0), new XYZ(-0.5, h, 0.0)), up).FamilyLabel = ph;
+		// Un tipo por tamaño, con la proporción de la imagen
+		double aspect = h / w;
+		FamilyType current = fm.CurrentType;
+		fm.Set(pw, w);
+		fm.Set(ph, h);
+		foreach (double cm in SizesCm)
+		{
+			double sw = UnitUtils.ConvertToInternalUnits(cm, UnitTypeId.Centimeters);
+			if (TypeName(sw) == TypeName(w))
+			{
+				continue;
+			}
+			fm.NewType(TypeName(sw));
+			fm.Set(pw, sw);
+			fm.Set(ph, sw * aspect);
+		}
+		fm.CurrentType = current;
+		fam.Regenerate();
+		return ex;
+	}
+
+	// Pinta cada tipo de la familia con la imagen, con la textura al tamaño de ese tipo (un material por tipo)
+	public static void PaintAll(Document doc, RevitApp app, Family family, string image, double w0, double h0)
+	{
+		foreach (FamilySymbol s in family.GetFamilySymbolIds().Select((ElementId id) => doc.GetElement(id)).OfType<FamilySymbol>())
+		{
+			double w = s.LookupParameter(WidthParam)?.AsDouble() ?? 0.0;
+			double h = s.LookupParameter(HeightParam)?.AsDouble() ?? 0.0;
+			if (w <= 0.0 || h <= 0.0)
+			{
+				// Un tipo sin parámetros de tamaño (de una versión anterior): se mide una pieza puesta
+				BoundingBoxXYZ bb = new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>().FirstOrDefault((FamilyInstance fi) => fi.Symbol.Id == s.Id)?.get_BoundingBox(null);
+				w = (bb == null) ? w0 : Math.Max(bb.Max.X - bb.Min.X, bb.Max.Y - bb.Min.Y);
+				h = (bb == null) ? h0 : (bb.Max.Z - bb.Min.Z);
+			}
+			Paint(doc, app, s, image, w, h, (s.Name == "Logo") ? MaterialName : (MaterialName + " " + s.Name.Replace("Logo ", "")));
 		}
 	}
 
@@ -151,13 +274,14 @@ internal static class LogoFamily
 	}
 
 	// Material con la imagen como textura, del tamaño exacto de la pieza (sin repetir). Dentro de una transacción.
-	public static Material Paint(Document doc, RevitApp app, FamilySymbol symbol, string image, double w, double h)
+	public static Material Paint(Document doc, RevitApp app, FamilySymbol symbol, string image, double w, double h, string materialName = MaterialName)
 	{
-		Material mat = new FilteredElementCollector(doc).OfClass(typeof(Material)).Cast<Material>().FirstOrDefault((Material m) => m.Name == MaterialName)
-			?? (doc.GetElement(Material.Create(doc, MaterialName)) as Material);
-		if (!(doc.GetElement(mat.AppearanceAssetId) is AppearanceAssetElement ae))
+		Material mat = new FilteredElementCollector(doc).OfClass(typeof(Material)).Cast<Material>().FirstOrDefault((Material m) => m.Name == materialName)
+			?? (doc.GetElement(Material.Create(doc, materialName)) as Material);
+		// Cada material con su propia apariencia (si la compartieran, la textura tendría un solo tamaño)
+		if (!(doc.GetElement(mat.AppearanceAssetId) is AppearanceAssetElement ae) || ae.Name != materialName)
 		{
-			ae = AppearanceAssetElement.GetAppearanceAssetElementByName(doc, MaterialName) ?? NewGenericAppearance(doc, app);
+			ae = AppearanceAssetElement.GetAppearanceAssetElementByName(doc, materialName) ?? NewGenericAppearance(doc, app, materialName);
 			mat.AppearanceAssetId = ae.Id;
 		}
 		mat.UseRenderAppearanceForShading = true;
@@ -189,20 +313,20 @@ internal static class LogoFamily
 	}
 
 	// Una apariencia "Generic" nueva: copia de una del proyecto si hay, si no de la biblioteca de Revit
-	private static AppearanceAssetElement NewGenericAppearance(Document doc, RevitApp app)
+	private static AppearanceAssetElement NewGenericAppearance(Document doc, RevitApp app, string name)
 	{
 		AppearanceAssetElement existing = new FilteredElementCollector(doc).OfClass(typeof(AppearanceAssetElement)).Cast<AppearanceAssetElement>()
 			.FirstOrDefault((AppearanceAssetElement a) => a.GetRenderingAsset()?.FindByName(Generic.GenericDiffuse) != null);
 		if (existing != null)
 		{
-			return existing.Duplicate(MaterialName);
+			return existing.Duplicate(name);
 		}
 		Asset generic = app.GetAssets(AssetType.Appearance).FirstOrDefault((Asset a) => a.FindByName(Generic.GenericDiffuse) != null);
 		if (generic == null)
 		{
 			throw new InvalidOperationException("couldn't find a Generic appearance to build the logo material");
 		}
-		return AppearanceAssetElement.Create(doc, MaterialName, generic);
+		return AppearanceAssetElement.Create(doc, name, generic);
 	}
 
 	private static void SetBitmap(AssetProperty prop, string path, double w, double h)

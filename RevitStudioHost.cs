@@ -2527,7 +2527,7 @@ internal class RevitStudioHost : IStudioHost
 			using (Transaction t = new Transaction(_doc, "Room Studio: logo material"))
 			{
 				t.Start();
-				LogoFamily.Paint(_doc, _uidoc.Application.Application, symbol, image, width, height);
+				LogoFamily.PaintAll(_doc, _uidoc.Application.Application, symbol.Family, image, width, height);
 				t.Commit();
 			}
 			return symbol;
@@ -2552,7 +2552,7 @@ internal class RevitStudioHost : IStudioHost
 		{
 			return Fail("this wall already has the logo (its image was updated)");
 		}
-		WallPlacer placer = new WallPlacer(_doc, new List<FamilySymbol> { symbol }, UnitUtils.ConvertToInternalUnits(150.0, UnitTypeId.Centimeters), HeightAlign.Center, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters), 0.0, 1, SideMode.Auto, Fmt);
+		WallPlacer placer = new WallPlacer(_doc, new List<FamilySymbol> { symbol }, UnitUtils.ConvertToInternalUnits(150.0, UnitTypeId.Centimeters), HeightAlign.Center, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters), 0.0, 1, SideMode.Auto, Fmt) { IgnoreExisting = true };
 		FaceRanges ranges = new FaceRanges();
 		ranges.Add(f.Face.Wall.Id, f.Face.Sign, f.Face.U0, f.Face.U1);
 		placer.Ranges = ranges;

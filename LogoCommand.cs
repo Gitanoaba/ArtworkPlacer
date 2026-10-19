@@ -144,7 +144,7 @@ public class LogoCommand : IExternalCommand
 			}
 			using Transaction t = new Transaction(doc, "Place Logo: logo material");
 			t.Start();
-			LogoFamily.Paint(doc, uiapp.Application, symbol, window.LogoPath, width, height);
+			LogoFamily.PaintAll(doc, uiapp.Application, symbol.Family, window.LogoPath, width, height);
 			if (!symbol.IsActive)
 			{
 				symbol.Activate();
@@ -169,7 +169,7 @@ public class LogoCommand : IExternalCommand
 		}
 
 		// 3. Colocar como el artwork: una pieza por cara, centrada, con vista previa de la cara
-		WallPlacer placer = new WallPlacer(doc, new List<FamilySymbol> { symbol }, window.CenterHeight, HeightAlign.Center, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters), 0.0, 1, SideMode.Auto, Fmt);
+		WallPlacer placer = new WallPlacer(doc, new List<FamilySymbol> { symbol }, window.CenterHeight, HeightAlign.Center, UnitUtils.ConvertToInternalUnits(30.0, UnitTypeId.Centimeters), 0.0, 1, SideMode.Auto, Fmt) { IgnoreExisting = true };
 		// Del mapa: solo en el tramo de cada cara elegida (el lado ya está elegido, no hace falta la vista previa)
 		placer.Ranges = mapRanges;
 		List<string> skipped = new List<string>();
@@ -238,14 +238,6 @@ public class LogoCommand : IExternalCommand
 	// Alto / ancho de la imagen, para que el logo tenga su proporción
 	internal static double Aspect(string path)
 	{
-		try
-		{
-			using System.Drawing.Image img = System.Drawing.Image.FromFile(path);
-			return (img.Width > 0) ? ((double)img.Height / img.Width) : 1.0;
-		}
-		catch
-		{
-			return 1.0;
-		}
+		return LogoFamily.Aspect(path);
 	}
 }

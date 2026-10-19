@@ -124,7 +124,7 @@ public class LogoWindow : Window
 		size.Children.Add(h);
 		body.Children.Add(size);
 
-		TextBlock steps = Theme.Note("Builds a \"Qbiq Logo\" family the size of the image, with the image as its material, and centers it on the wall. Check the arrow, click the wall to switch faces, then press ESC to place it. Running it again with another image or size updates the logo already placed.");
+		TextBlock steps = Theme.Note("Builds a \"Qbiq Logo\" family the size of the image, with the image as its material, and centers it on the wall. Check the arrow, click the wall to switch faces, then press ESC to place it. Running it again with another image updates the logos already placed. To change one logo's size in Revit, select it and pick another size (Logo 60 cm … Logo 250 cm) in the Type Selector.");
 		steps.FontSize = 12.0;
 		steps.Margin = new Thickness(0.0, 16.0, 0.0, 0.0);
 		body.Children.Add(steps);

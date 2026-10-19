@@ -66,6 +66,9 @@ internal class WallPlacer : WallFaces
 
 	public FaceRanges Ranges;
 
+	// Para el logo: una cara con arte ya puesto igual sirve (se esquivan las piezas, no se rechaza la cara)
+	public bool IgnoreExisting;
+
 	private double RefHeight
 	{
 		get
@@ -294,6 +297,10 @@ internal class WallPlacer : WallFaces
 
 	private bool HasExisting(Wall wall, WallGeom g, Side side)
 	{
+		if (IgnoreExisting)
+		{
+			return false;
+		}
 		List<Tuple<double, double>> ranges = RangesOf(wall, g, side.Sign);
 		return side.Existing.Any((Tuple<double, double> e) => ranges.Any((Tuple<double, double> r) => e.Item1 < r.Item2 && e.Item2 > r.Item1));
 	}
