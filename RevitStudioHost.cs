@@ -258,7 +258,7 @@ internal class RevitStudioHost : IStudioHost
 		Sign = _logoFace.Face.Sign,
 		U0 = _logoFace.Face.U0,
 		U1 = _logoFace.Face.U1,
-		Room = NameOf(_logoFace.RoomId)
+		Room = (_logoFace.RoomId != 0) ? NameOf(_logoFace.RoomId) : null
 	};
 
 	private readonly Dictionary<long, List<FoundRoom>> _enclosures = new Dictionary<long, List<FoundRoom>>();
@@ -615,7 +615,12 @@ internal class RevitStudioHost : IStudioHost
 
 	private string NameOf(long roomId)
 	{
-		return _layoutRooms.TryGetValue(roomId, out var l) ? l.Name : RoomName(_rooms[roomId]);
+		// Una cara sin room (pasillo) no tiene nombre de room
+		if (_layoutRooms.TryGetValue(roomId, out var l))
+		{
+			return l.Name;
+		}
+		return _rooms.TryGetValue(roomId, out var r) ? RoomName(r) : "Corridor";
 	}
 
 	private ElementId LevelOf(long roomId)
